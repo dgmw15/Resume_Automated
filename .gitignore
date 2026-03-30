@@ -1,0 +1,40 @@
+# Environment & secrets
+.env
+*.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Browser sessions & Playwright state
+.sessions/
+auth/
+
+# Generated output (runtime artifacts — not source)
+job_automation/output/
+job_automation/trawl.log
+job_automation/trawl_results.xlsx
+job_automation/trawl_results_enriched.xlsx
+job_automation/Database.xlsx
+
+# Personal files
+Resume/
+
+# Planning & AI scaffold directories
+_bmad/
+_bmad-output/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
