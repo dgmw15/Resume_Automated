@@ -33,6 +33,7 @@ Resume/
 _bmad/
 _bmad-output/
 .claude/
+.github/
 
 # OS
 .DS_Store
