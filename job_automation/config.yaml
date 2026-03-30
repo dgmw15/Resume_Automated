@@ -1,0 +1,128 @@
+# config.yaml — Runtime settings
+
+search:
+  # Fallback roles used only if the Excel file below is missing or the sheet is empty
+  keywords:
+    - "Software Engineer"
+    - "Backend Developer"
+  locations:
+    - "Singapore"
+  # Load job roles from an Excel file (takes priority over keywords above)
+  roles_excel:
+    path: "job_roles.xlsx"    # path relative to job_automation/
+    sheet: "Roles"            # sheet name
+    column: "Job Role"        # column header in that sheet
+
+portals:
+  careersfuture:
+    enabled: true
+    max_actions_per_hour: 30
+    min_delay_seconds: 5
+    max_delay_seconds: 15
+  indeed:
+    enabled: true
+    max_actions_per_hour: 20
+    min_delay_seconds: 8
+    max_delay_seconds: 20
+  jobstreet:
+    enabled: false
+    max_actions_per_hour: 15
+    min_delay_seconds: 10
+    max_delay_seconds: 25
+
+# Legacy Vertex AI config kept for reference — no longer used in active execution path
+vertex_ai:
+  project_id: ""          # GCP project ID
+  location: "us-central1"
+  model: "gemini-1.5-pro"
+
+excel:
+  path: "Database.xlsx"
+
+session:
+  reauth_buffer_minutes: 5   # Re-authenticate this many minutes before expiry
+
+# ---------------------------------------------------------------------------
+# Validation — deterministic JD relevance gate (no AI calls)
+# ---------------------------------------------------------------------------
+validation:
+  min_keyword_hits: 3          # Minimum technical keywords required to pass
+  role_keyword_sets:
+    analyst:
+      - "sql"
+      - "python"
+      - "tableau"
+      - "power bi"
+      - "bi"
+      - "dashboard"
+      - "analytics"
+      - "metrics"
+      - "kpi"
+      - "reporting"
+      - "data analysis"
+      - "excel"
+      - "a/b test"
+      - "experimentation"
+      - "stakeholder"
+    engineer:
+      - "sql"
+      - "python"
+      - "etl"
+      - "elt"
+      - "pipeline"
+      - "spark"
+      - "airflow"
+      - "dbt"
+      - "kafka"
+      - "data warehouse"
+      - "bigquery"
+      - "redshift"
+      - "snowflake"
+      - "orchestration"
+      - "cloud"
+      - "aws"
+      - "gcp"
+      - "azure"
+  deny_patterns:
+    - "insurance agent"
+    - "financial advisor"
+    - "sales agent"
+    - "commission only"
+    - "life insurance"
+    - "unit trust"
+    - "financial planner"
+    - "wealth management advisor"
+    - "recruitment consultant"
+
+# ---------------------------------------------------------------------------
+# Batch processing — 24-hour SLA window
+# ---------------------------------------------------------------------------
+batch:
+  enabled: true
+  interval_minutes: 30         # How often the batch worker runs
+  batch_size: 5                # Max jobs processed per run
+  target_sla_hours: 24         # Target time-to-complete for queued jobs
+  max_retries: 3               # Max AI call retries before marking FAILED
+
+# ---------------------------------------------------------------------------
+# AI provider routing
+# ---------------------------------------------------------------------------
+ai:
+  provider: "anthropic"        # Primary provider: "openrouter" or "anthropic"
+  fallback_order:
+    - "anthropic"
+    - "openrouter"
+  model_map:
+    analyst: "claude-sonnet-4-6"
+    engineer: "claude-sonnet-4-6"
+  budget:
+    daily_cap_usd: 5.00
+    monthly_cap_usd: 50.00
+    hard_stop: true            # If true, raise BudgetExceededError when cap hit
+
+# ---------------------------------------------------------------------------
+# Output — generated artifacts
+# ---------------------------------------------------------------------------
+output:
+  docx_output_dir: "output/docs"
+  docx_template_path: ""       # Optional: path to a .docx template file
