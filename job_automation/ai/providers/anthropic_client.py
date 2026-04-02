@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 
 import anthropic
@@ -22,6 +23,13 @@ _COST_PER_1M_OUTPUT = 15.00
 
 MAX_RETRIES = 3
 BASE_WAIT = 10  # seconds
+
+_MARKDOWN_STRIP_RE = re.compile(r"(\*{1,3}|_{1,3}|`{1,3}|~~|#{1,6}\s?)")
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown decorators the model may emit despite prompt instructions."""
+    return _MARKDOWN_STRIP_RE.sub("", text)
 
 
 class AnthropicProvider(BaseProvider):
@@ -55,7 +63,7 @@ class AnthropicProvider(BaseProvider):
                     system=system_prompt,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                text = response.content[0].text.strip()
+                text = _strip_markdown(response.content[0].text.strip())
                 input_tokens = response.usage.input_tokens
                 output_tokens = response.usage.output_tokens
                 total_tokens = input_tokens + output_tokens
