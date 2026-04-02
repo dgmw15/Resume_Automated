@@ -87,10 +87,11 @@ A Streamlit review UI lets you read each tailored resume and mark it APPROVED or
 
 ### AI pipeline tracks
 
-The system detects whether a role is **analyst** or **engineer** from the job title (no AI call needed):
+The system uses different "tracks" based on the type of role to ensure the generated resume highlights the most relevant skills. It detects whether a role is more analysis-focused or engineering-focused from the job title (no AI call needed).
 
-- **Analyst** — SQL, BI tools (Tableau/Power BI/Looker), dashboards, A/B testing, KPIs, stakeholder communication
-- **Engineer** — ETL/ELT, Airflow/dbt/Spark, cloud data warehouses (BigQuery/Redshift/Snowflake), streaming (Kafka), IaC
+For example:
+- **Analysis-focused roles** — These roles typically involve SQL, BI tools (like Tableau, Power BI, or Looker), creating dashboards, A/B testing, defining KPIs, and stakeholder communication.
+- **Engineering-focused roles** — These roles typically involve ETL/ELT processes, tools like Airflow, dbt, or Spark, cloud data warehouses (such as BigQuery, Redshift, or Snowflake), data streaming (with technologies like Kafka), and Infrastructure as Code (IaC).
 
 Each track has a dedicated system prompt (`ai/prompts.py`) with focus areas and strict anti-hallucination rules. Claude is instructed never to invent experience — it only reorders and re-emphasises what is already in your base resume.
 
