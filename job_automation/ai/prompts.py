@@ -5,11 +5,20 @@ Analyst track  — SQL, BI, dashboarding, stakeholder reporting, experimentation
 Engineer track — Data pipelines, ETL/ELT, orchestration, cloud data stack, reliability.
 
 Maintenance notes:
-- Keep _STRICT_RULES unchanged; it is the primary anti-hallucination guard.
+- Keep _STRICT_RULES and _OUTPUT_FORMAT unchanged; they are the primary
+  anti-hallucination guard and the contract with docx_renderer.py.
 - Add new focus areas to ANALYST_FOCUS or ENGINEER_FOCUS when the hiring
   market shifts (e.g. new tools trending in JDs).
 - Templates use {job_description} and {base_resume} as the only placeholders.
-- Output must be plain text — no markdown — so DOCX rendering works cleanly.
+
+Output format contract (mirrors docx_renderer._classify_lines rules):
+  Line 1        — Full name only. Nothing before it.
+  Line 2        — Contact info, fields separated by  |  (email, phone, location, LinkedIn).
+  Blank line    — One blank line before every section header.
+  Section header — ALL CAPS, ≤ 60 characters (e.g. WORK EXPERIENCE, EDUCATION, SKILLS).
+  Role line     — Company | Job Title | Mon YYYY – Mon YYYY  (must contain | and a date).
+  Bullet        — Starts with "-  " (dash space). One bullet per line.
+  Body          — Free prose (summary text, skill lists, etc.).
 """
 
 # ---------------------------------------------------------------------------
@@ -26,11 +35,49 @@ STRICT RULES:
 5. If a required skill in the job description is absent from the resume,
    leave it out — never hallucinate a match.
 6. Keep the tone professional and concise. Do not pad with filler sentences.
+"""
 
-OUTPUT FORMAT:
-Return the full tailored resume as clean plain text.
-No markdown, no section headers like "Tailored Resume:".
-The output must be copy-paste and DOCX-render ready.
+# ---------------------------------------------------------------------------
+# Output format specification — mirrors docx_renderer._classify_lines exactly
+# ---------------------------------------------------------------------------
+# IMPORTANT: This block is the contract between the AI output and the DOCX
+# renderer. Every rule below corresponds to a detection rule in
+# output/docx_renderer.py. Do not change formatting rules here without
+# updating the renderer, and vice versa.
+_OUTPUT_FORMAT = """
+OUTPUT FORMAT — follow every rule exactly, no exceptions:
+
+STRUCTURE (in this order):
+  Line 1:  Full name only — e.g.  John Doe
+  Line 2:  Contact details separated by  |  — e.g.  john@email.com | +65 9123 4567 | Singapore | linkedin.com/in/johndoe
+  [blank line]
+  SUMMARY
+  [2–3 sentence professional summary as body text]
+  [blank line]
+  WORK EXPERIENCE
+  Company Name | Job Title | Mon YYYY – Mon YYYY
+  - Achievement or responsibility
+  - Achievement or responsibility
+  [blank line between each role]
+  EDUCATION
+  Institution | Degree | YYYY – YYYY
+  [blank line]
+  SKILLS
+  Skill 1, Skill 2, Skill 3, ...
+  [blank line]
+  [any additional sections from the original resume, same format]
+
+FORMATTING RULES:
+  - Section headers MUST be ALL CAPS (WORK EXPERIENCE, EDUCATION, SKILLS, etc.).
+  - Role lines MUST use the pipe format:  Company | Title | Mon YYYY – Mon YYYY
+    The date portion must include at least a year (e.g. 2022, Jan 2022, Present).
+  - Every bullet point MUST start with "-  " (a dash followed by a space).
+  - Separate every section from the previous content with exactly one blank line.
+  - Do NOT use markdown: no **, no __, no ##, no `, no ~~, no >.
+  - Do NOT add a preamble such as "Here is the tailored resume:" — output starts
+    with the candidate's name on line 1, nothing before it.
+  - Do NOT add a sign-off or closing line after the last section.
+  - Plain text only. The output is passed directly to a DOCX renderer.
 """
 
 # ---------------------------------------------------------------------------
@@ -40,6 +87,7 @@ TAILOR_SYSTEM_PROMPT = f"""
 You are a professional resume editor with 15 years of experience in technical recruitment.
 Your task is to tailor a candidate's existing resume to better match a specific job description.
 {_STRICT_RULES}
+{_OUTPUT_FORMAT}
 """
 
 TAILOR_USER_TEMPLATE = """
@@ -51,8 +99,8 @@ TAILOR_USER_TEMPLATE = """
 
 --- TASK ---
 Rewrite the resume above to better match the job description.
-Follow the strict rules in your system instructions exactly.
-Return only the full tailored resume text.
+Follow the strict rules and output format in your system instructions exactly.
+Output starts with the candidate's name on line 1. Nothing before it, nothing after the last section.
 """
 
 # ---------------------------------------------------------------------------
@@ -87,6 +135,7 @@ ANALYST FOCUS AREAS — when these appear in the JD, elevate matching resume con
 - Python / R for analysis: pandas, NumPy, scipy, matplotlib, seaborn
 - Advanced Excel / Google Sheets: pivot tables, VLOOKUP, formulas
 {_STRICT_RULES}
+{_OUTPUT_FORMAT}
 """
 
 # Example of how this template renders:
@@ -103,8 +152,8 @@ ANALYST_USER_TEMPLATE = """
 Rewrite the resume above to better match the analyst job description.
 Prioritise SQL, BI tools, dashboard/reporting work, stakeholder communication,
 and experimentation experience where they appear in both the JD and the resume.
-Follow the strict rules in your system instructions exactly.
-Return only the full tailored resume text.
+Follow the strict rules and output format in your system instructions exactly.
+Output starts with the candidate's name on line 1. Nothing before it, nothing after the last section.
 """
 
 # ---------------------------------------------------------------------------
@@ -141,6 +190,7 @@ ENGINEER FOCUS AREAS — when these appear in the JD, elevate matching resume co
 - Infrastructure as code and CI/CD: Terraform, Pulumi, GitHub Actions, Jenkins
 - Languages: Python, Scala, Java, SQL
 {_STRICT_RULES}
+{_OUTPUT_FORMAT}
 """
 
 # Example of how this template renders:
@@ -157,6 +207,6 @@ ENGINEER_USER_TEMPLATE = """
 Rewrite the resume above to better match the data engineering job description.
 Prioritise pipeline experience, orchestration tools, cloud data stack, streaming,
 and reliability/observability ownership where they appear in both the JD and the resume.
-Follow the strict rules in your system instructions exactly.
-Return only the full tailored resume text.
+Follow the strict rules and output format in your system instructions exactly.
+Output starts with the candidate's name on line 1. Nothing before it, nothing after the last section.
 """
