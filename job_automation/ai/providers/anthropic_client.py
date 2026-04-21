@@ -33,14 +33,17 @@ def _strip_markdown(text: str) -> str:
 
 
 class AnthropicProvider(BaseProvider):
-    """Calls Claude via the Anthropic Messages API."""
+    """Calls Claude via the Anthropic Messages API.
 
-    def __init__(self, budget_guard: "BudgetGuard | None" = None) -> None:
+    Budget enforcement is handled upstream by ProviderRouter / BudgetLedger.
+    This class is a pure "call the API and return a result" adapter.
+    """
+
+    def __init__(self) -> None:
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
             raise EnvironmentError("ANTHROPIC_API_KEY environment variable is not set.")
         self._client = anthropic.Anthropic(api_key=api_key)
-        self._budget = budget_guard
 
     def generate(
         self,
@@ -50,9 +53,6 @@ class AnthropicProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 0.3,
     ) -> ProviderResult:
-        if self._budget and self._budget.is_exceeded():
-            raise BudgetExceededError(self._budget.exceeded_reason())
-
         last_err: Exception | None = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -71,8 +71,6 @@ class AnthropicProvider(BaseProvider):
                     input_tokens / 1_000_000 * _COST_PER_1M_INPUT
                     + output_tokens / 1_000_000 * _COST_PER_1M_OUTPUT
                 )
-                if self._budget:
-                    self._budget.record_spend(cost)
                 logger.info(
                     "Anthropic generation OK (attempt %d) tokens=%d cost=$%.4f",
                     attempt, total_tokens, cost,
@@ -84,8 +82,6 @@ class AnthropicProvider(BaseProvider):
                     estimated_cost_usd=cost,
                     raw_usage_tokens=total_tokens,
                 )
-            except BudgetExceededError:
-                raise
             except Exception as exc:
                 last_err = exc
                 wait = BASE_WAIT * (2 ** (attempt - 1))

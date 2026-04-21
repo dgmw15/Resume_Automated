@@ -23,14 +23,17 @@ BASE_WAIT = 10
 
 
 class OpenRouterProvider(BaseProvider):
-    """Calls any model via OpenRouter's OpenAI-compatible endpoint."""
+    """Calls any model via OpenRouter's OpenAI-compatible endpoint.
 
-    def __init__(self, budget_guard: "BudgetGuard | None" = None) -> None:
+    Budget enforcement is handled upstream by ProviderRouter / BudgetLedger.
+    This class is a pure "call the API and return a result" adapter.
+    """
+
+    def __init__(self) -> None:
         api_key = os.environ.get("OPENROUTER_API_KEY", "")
         if not api_key:
             raise EnvironmentError("OPENROUTER_API_KEY environment variable is not set.")
         self._api_key = api_key
-        self._budget = budget_guard
 
     def generate(
         self,
@@ -40,9 +43,6 @@ class OpenRouterProvider(BaseProvider):
         max_tokens: int = 4096,
         temperature: float = 0.3,
     ) -> ProviderResult:
-        if self._budget and self._budget.is_exceeded():
-            raise BudgetExceededError(self._budget.exceeded_reason())
-
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -69,8 +69,6 @@ class OpenRouterProvider(BaseProvider):
                 usage = data.get("usage", {})
                 total_tokens = usage.get("total_tokens", 0)
                 cost = total_tokens / 1000 * _FALLBACK_COST_PER_1K_TOKENS
-                if self._budget:
-                    self._budget.record_spend(cost)
                 logger.info(
                     "OpenRouter generation OK (attempt %d) model=%s tokens=%d cost=$%.4f",
                     attempt, model, total_tokens, cost,
@@ -82,8 +80,6 @@ class OpenRouterProvider(BaseProvider):
                     estimated_cost_usd=cost,
                     raw_usage_tokens=total_tokens or None,
                 )
-            except BudgetExceededError:
-                raise
             except Exception as exc:
                 last_err = exc
                 wait = BASE_WAIT * (2 ** (attempt - 1))

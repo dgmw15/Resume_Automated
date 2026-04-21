@@ -1,76 +1,65 @@
 """
 ai/provider_router.py — Routes AI generation calls to the configured provider
-with budget enforcement and fallback support.
+with persistent atomic budget enforcement and fallback support.
+
+Budget enforcement is delegated to core.budget_ledger.BudgetLedger, which
+serialises reservations through a file lock so concurrent workers cannot
+each see "cap not exceeded" and simultaneously blow past the limit.
 """
 from __future__ import annotations
 
 import logging
+import uuid
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
 from ai.providers.base import BaseProvider, BudgetExceededError, ProviderResult
+from core.budget_ledger import BudgetLedger
 
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path("config.yaml")
 
-
-class BudgetGuard:
-    """
-    In-process spend tracker.  Resets on daily/monthly boundary.
-    For simplicity the counters are in-memory — they reset when the process
-    restarts.  For persistent tracking write to a sidecar file.
-    """
-
-    def __init__(self, daily_cap: float, monthly_cap: float, hard_stop: bool) -> None:
-        self._daily_cap = daily_cap
-        self._monthly_cap = monthly_cap
-        self._hard_stop = hard_stop
-        self._daily_spend = 0.0
-        self._monthly_spend = 0.0
-
-    def record_spend(self, amount: float) -> None:
-        self._daily_spend += amount
-        self._monthly_spend += amount
-        logger.debug(
-            "Budget: +$%.4f  daily=$%.4f/%.2f  monthly=$%.4f/%.2f",
-            amount,
-            self._daily_spend, self._daily_cap,
-            self._monthly_spend, self._monthly_cap,
-        )
-
-    def is_exceeded(self) -> bool:
-        if not self._hard_stop:
-            return False
-        return self._daily_spend >= self._daily_cap or self._monthly_spend >= self._monthly_cap
-
-    def exceeded_reason(self) -> str:
-        if self._daily_spend >= self._daily_cap:
-            return f"Daily cap ${self._daily_cap:.2f} reached (spent ${self._daily_spend:.4f})"
-        return f"Monthly cap ${self._monthly_cap:.2f} reached (spent ${self._monthly_spend:.4f})"
+# Conservative cost estimate per request used for the pre-call reservation.
+# Real cost is confirmed (committed) after the provider responds.
+_ESTIMATED_COST_PER_REQUEST_USD = 0.05
 
 
 class ProviderRouter:
     """
     Selects the configured primary provider, falls back to secondary providers
-    on failure, and enforces the budget guard.
+    on failure, and enforces budget caps via the persistent BudgetLedger.
+
+    Args:
+        config:       full config dict (from config.yaml).
+        ledger:       optional pre-built BudgetLedger; if None, one is created
+                      from the config.  Pass a custom ledger in tests.
+        ledger_path:  path for the ledger JSON file (default: budget_ledger.json).
     """
 
-    def __init__(self, config: dict) -> None:
+    def __init__(
+        self,
+        config: dict,
+        ledger: Optional[BudgetLedger] = None,
+        ledger_path: Optional[Path] = None,
+    ) -> None:
         ai_cfg = config.get("ai", {})
-        budget_cfg = ai_cfg.get("budget", {})
 
-        self._budget = BudgetGuard(
-            daily_cap=float(budget_cfg.get("daily_cap_usd", 5.0)),
-            monthly_cap=float(budget_cfg.get("monthly_cap_usd", 50.0)),
-            hard_stop=bool(budget_cfg.get("hard_stop", True)),
-        )
         self._fallback_order: list[str] = ai_cfg.get(
             "fallback_order", [ai_cfg.get("provider", "anthropic")]
         )
         self._model_map: dict[str, str] = ai_cfg.get("model_map", {})
         self._providers: dict[str, BaseProvider] = {}
+
+        # Budget ledger (persistent, file-locked)
+        if ledger is not None:
+            self._ledger = ledger
+        else:
+            path = ledger_path or Path("budget_ledger.json")
+            self._ledger = BudgetLedger.from_config(config, ledger_path=path)
+
         self._init_providers()
 
     def _init_providers(self) -> None:
@@ -85,10 +74,10 @@ class ProviderRouter:
     def _build_provider(self, name: str) -> BaseProvider:
         if name == "anthropic":
             from ai.providers.anthropic_client import AnthropicProvider
-            return AnthropicProvider(budget_guard=self._budget)
+            return AnthropicProvider()
         if name == "openrouter":
             from ai.providers.openrouter_client import OpenRouterProvider
-            return OpenRouterProvider(budget_guard=self._budget)
+            return OpenRouterProvider()
         raise ValueError(f"Unknown provider: {name!r}")
 
     def model_for_track(self, track: str) -> str:
@@ -102,29 +91,79 @@ class ProviderRouter:
         track: str = "analyst",
         max_tokens: int = 4096,
         temperature: float = 0.3,
+        idempotency_key: Optional[str] = None,
+        job_id: Optional[str] = None,
     ) -> ProviderResult:
         """
-        Try providers in fallback order.  Returns the first successful result.
-        Raises BudgetExceededError immediately if cap hit.
-        Raises RuntimeError if all providers fail.
+        Reserve budget, try providers in fallback order, then commit.
+
+        If idempotency_key is provided and already committed in the ledger,
+        the call is a no-op replay — returns a stub result without re-charging.
+
+        Raises:
+            BudgetExceededError: spend cap would be exceeded.
+            RuntimeError: all providers exhausted.
         """
+        idem_key = idempotency_key or str(uuid.uuid4())
+
+        # --- Idempotency deduplication ---
+        existing_rid = self._ledger.is_idempotency_key_committed(idem_key)
+        if existing_rid:
+            logger.info(
+                "Idempotency key %r already committed (rid=%s) — skipping provider call.",
+                idem_key, existing_rid,
+            )
+            # Return a zero-cost stub so the caller can proceed normally
+            return ProviderResult(
+                text="[DEDUPLICATED — see original committed result]",
+                model=self.model_for_track(track),
+                provider="dedup",
+                estimated_cost_usd=0.0,
+            )
+
+        # --- Budget reservation (blocks if cap would be exceeded) ---
+        reservation_id = self._ledger.reserve(
+            job_id=job_id or "unknown",
+            estimated_usd=_ESTIMATED_COST_PER_REQUEST_USD,
+            idempotency_key=idem_key,
+        )
+
         model = self.model_for_track(track)
+        result: Optional[ProviderResult] = None
 
-        for name in self._fallback_order:
-            provider = self._providers.get(name)
-            if provider is None:
-                continue
-            try:
-                return provider.generate(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    model=model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                )
-            except BudgetExceededError:
-                raise
-            except Exception as exc:
-                logger.warning("Provider '%s' failed: %s — trying next.", name, exc)
+        try:
+            for name in self._fallback_order:
+                provider = self._providers.get(name)
+                if provider is None:
+                    continue
+                try:
+                    result = provider.generate(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                    break
+                except Exception as exc:
+                    logger.warning("Provider '%s' failed: %s — trying next.", name, exc)
 
-        raise RuntimeError("All configured AI providers failed.")
+            if result is None:
+                raise RuntimeError("All configured AI providers failed.")
+
+            # --- Confirm actual cost against the reservation ---
+            self._ledger.commit(reservation_id, actual_usd=result.estimated_cost_usd)
+            return result
+
+        except BudgetExceededError:
+            # Already raised from reserve() — no reservation to release
+            raise
+
+        except Exception:
+            # Release the reservation so the budget becomes available again
+            self._ledger.release(reservation_id, reason="provider error or all failed")
+            raise
+
+    @property
+    def ledger(self) -> BudgetLedger:
+        return self._ledger
