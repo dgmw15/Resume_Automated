@@ -32,6 +32,8 @@ class ResumeTailor:
         track: str = "analyst",
         system_prompt: str = "",
         user_template: str = "",
+        idempotency_key: str | None = None,
+        job_id: str | None = None,
     ) -> ProviderResult:
         """
         Generate a tailored resume.
@@ -42,6 +44,8 @@ class ResumeTailor:
             track:            "analyst" or "engineer" — selects model + prompt.
             system_prompt:    override system prompt (supplied by pipeline.py).
             user_template:    override user template (supplied by pipeline.py).
+            idempotency_key:  stable key reused across retries to prevent duplicate charges.
+            job_id:           used for budget ledger reservation metadata.
 
         Returns:
             ProviderResult with the tailored text and cost metadata.
@@ -60,6 +64,8 @@ class ResumeTailor:
             prompt=prompt,
             system_prompt=system_prompt,
             track=track,
+            idempotency_key=idempotency_key,
+            job_id=job_id,
         )
         logger.info(
             "Resume tailored OK via %s model=%s cost=$%.4f",

@@ -4,13 +4,23 @@ core/batch_processor.py — 24-hour SLA batch worker.
 Pulls VALIDATION_PASSED rows, queues them as BATCH_QUEUED, then processes
 them in chunks, respecting batch_size, interval_minutes, and max_retries
 from config.
+
+Idempotency (Prompt 13)
+-----------------------
+- An idempotency_key is generated once per job attempt group (UUID derived
+  from job_id so it is stable across retries for the same job).
+- The key is persisted in the tracker before any provider call.
+- ProviderRouter checks the key against the BudgetLedger: if already
+  committed, it returns a stub result without re-charging.
+- DOCX rendering is also idempotent: DocxRenderer skips re-writing if the
+  final file already exists and passes validation.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-import time
+import uuid
 from pathlib import Path
 
 from ai.pipeline import get_prompts, select_track
@@ -18,7 +28,7 @@ from ai.providers.base import BudgetExceededError
 from ai.tailor import ResumeTailor
 from data.models import JobStatus
 from data.tracker import ExcelTracker
-from output.docx_renderer import DocxRenderer
+from output.docx_renderer import DocxRenderer, DocxValidationError
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +40,10 @@ class BatchProcessor:
     Processes validated jobs via the AI tailor in controlled batches.
 
     Args:
-        tracker:     shared ExcelTracker instance.
-        tailor:      ResumeTailor backed by ProviderRouter.
-        batch_cfg:   dict from config["batch"].
+        tracker:        shared ExcelTracker instance.
+        tailor:         ResumeTailor backed by ProviderRouter.
+        batch_cfg:      dict from config["batch"].
+        docx_renderer:  optional DocxRenderer for DOCX output.
     """
 
     def __init__(
@@ -58,7 +69,7 @@ class BatchProcessor:
         """
         Execute one batch cycle:
           1. Move VALIDATION_PASSED rows to BATCH_QUEUED.
-          2. Compute how many to process this run.
+          2. Compute how many to process this run (SLA-aware).
           3. Process up to that many BATCH_QUEUED rows.
 
         Returns the number of jobs successfully processed this cycle.
@@ -82,6 +93,9 @@ class BatchProcessor:
             "BatchProcessor: %d queued, processing %d this run (batch_size=%d).",
             len(queued), jobs_this_run, self._batch_size,
         )
+
+        # SLA drift check
+        self._check_sla_drift(len(queued))
 
         processed = 0
         for row in queued[:jobs_this_run]:
@@ -115,6 +129,28 @@ class BatchProcessor:
         per_run = math.ceil(queue_depth / runs_in_sla)
         return min(per_run, self._batch_size)
 
+    def _check_sla_drift(self, queue_depth: int) -> None:
+        """Log a warning if the queue cannot be cleared within the SLA window."""
+        runs_in_sla = max(1, (self._sla_hours * 60) // self._interval_minutes)
+        max_clearable = runs_in_sla * self._batch_size
+        if queue_depth > max_clearable:
+            projected_hours = (queue_depth / self._batch_size) * (self._interval_minutes / 60)
+            logger.warning(
+                "SLA DRIFT: queue_depth=%d exceeds max_clearable=%d within %dh. "
+                "Projected completion: %.1fh. Consider increasing batch_size or "
+                "reducing interval_minutes.",
+                queue_depth, max_clearable, self._sla_hours, projected_hours,
+            )
+
+    @staticmethod
+    def _make_idempotency_key(job_id: str) -> str:
+        """
+        Derive a stable idempotency key from the job_id.
+        Using UUID5 (namespace + name) gives the same key for the same job_id
+        every time, so retries reuse it without storing state across restarts.
+        """
+        return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"job-tailoring-{job_id}"))
+
     async def _process_row(self, row: dict, base_resume: str) -> bool:
         job_id = row.get("id")
         if not job_id:
@@ -125,9 +161,20 @@ class BatchProcessor:
 
         if not raw_desc:
             logger.warning("Job %s has no raw_description — marking FAILED.", job_id)
-            self._tracker.update(job_id, status=JobStatus.FAILED,
-                                 validation_reason="No raw_description")
+            self._tracker.update(
+                job_id,
+                status=JobStatus.FAILED,
+                validation_reason="No raw_description",
+            )
             return False
+
+        # --- Stable idempotency key for this job ---
+        idem_key = self._make_idempotency_key(job_id)
+
+        # Persist the key so the tracker reflects it (idempotent write)
+        existing_key = row.get("idempotency_key")
+        if not existing_key:
+            self._tracker.update(job_id, idempotency_key=idem_key)
 
         track = select_track(role)
         system_prompt, user_template = get_prompts(track)
@@ -143,7 +190,10 @@ class BatchProcessor:
                     track=track,
                     system_prompt=system_prompt,
                     user_template=user_template,
+                    idempotency_key=idem_key,
+                    job_id=job_id,
                 )
+
                 self._tracker.mark_ai_result(
                     job_id=job_id,
                     tailored_text=result.text,
@@ -156,14 +206,24 @@ class BatchProcessor:
                     job_id, result.provider, track, result.estimated_cost_usd,
                 )
 
-                # Render DOCX if renderer is available
+                # DOCX rendering (idempotent — renderer skips if file is already valid)
                 if self._docx_renderer:
                     try:
                         docx_path = self._docx_renderer.render(job_id, result.text)
                         self._tracker.mark_docx_ready(job_id, str(docx_path))
                         logger.info("DOCX ready for job %s at %s", job_id, docx_path)
+                    except DocxValidationError as dve:
+                        error_msg = str(dve)
+                        self._tracker.mark_docx_failed(job_id, error=error_msg)
+                        logger.error(
+                            "DOCX validation failed for job %s: %s", job_id, error_msg
+                        )
+                        # AI tailoring succeeded; DOCX failure is a separate concern
+                        return True
                     except Exception as docx_exc:
-                        logger.warning("DOCX render failed for job %s: %s", job_id, docx_exc)
+                        logger.warning(
+                            "DOCX render error for job %s: %s", job_id, docx_exc
+                        )
 
                 return True
 
