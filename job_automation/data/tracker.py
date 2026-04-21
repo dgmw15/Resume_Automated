@@ -16,7 +16,9 @@ COLUMNS = [
     "id", "portal_name", "role", "company", "url",
     "raw_description", "tailored_resume", "status", "page_num", "timestamp",
     "validation_score", "validation_reason", "pipeline_track",
-    "ai_provider_used", "cost_usd", "docx_path", "processed_at",
+    "ai_provider_used", "cost_usd", "cost_reserved_usd", "cost_actual_usd",
+    "reservation_id", "reservation_expires_at", "idempotency_key",
+    "docx_path", "docx_validation_error", "processed_at",
 ]
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
@@ -215,3 +217,55 @@ class ExcelTracker:
 
     def mark_docx_ready(self, job_id: str, docx_path: str) -> bool:
         return self.update(job_id, status=JobStatus.DOCX_READY, docx_path=docx_path)
+
+    def mark_docx_failed(self, job_id: str, error: str) -> bool:
+        return self.update(
+            job_id,
+            status=JobStatus.DOCX_GENERATION_FAILED,
+            docx_validation_error=error,
+        )
+
+    def mark_reservation(
+        self,
+        job_id: str,
+        reservation_id: str,
+        reserved_usd: float,
+        expires_at: datetime,
+        idempotency_key: str,
+    ) -> bool:
+        return self.update(
+            job_id,
+            reservation_id=reservation_id,
+            cost_reserved_usd=reserved_usd,
+            reservation_expires_at=expires_at.isoformat(),
+            idempotency_key=idempotency_key,
+        )
+
+    def mark_reservation_committed(
+        self,
+        job_id: str,
+        actual_usd: float,
+    ) -> bool:
+        return self.update(
+            job_id,
+            cost_actual_usd=actual_usd,
+            cost_usd=actual_usd,
+            reservation_id=None,
+            reservation_expires_at=None,
+        )
+
+    def get_active_reservations(self) -> list[dict]:
+        """Return all rows that currently hold a non-null reservation_id."""
+        wb = self._load()
+        ws = wb["Jobs"]
+        col = self._col_map(ws)
+        col_names = list(col.keys())
+
+        results = []
+        if "reservation_id" not in col:
+            return results
+        rid_idx = col["reservation_id"] - 1
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if row[rid_idx] not in (None, ""):
+                results.append({col_names[i]: row[i] for i in range(len(col_names))})
+        return results

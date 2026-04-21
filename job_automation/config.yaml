@@ -119,6 +119,10 @@ ai:
     daily_cap_usd: 5.00
     monthly_cap_usd: 50.00
     hard_stop: true            # If true, raise BudgetExceededError when cap hit
+    budget_timezone: "UTC"     # Timezone for daily reset boundary (e.g. "Asia/Singapore")
+    budget_precision_decimals: 4   # Decimal places for cost comparisons and rounding
+    cost_lock_timeout_seconds: 60  # Seconds before an unconfirmed reservation is expired
+    reservation_cleanup_interval_seconds: 300  # How often the cleanup cadence runs
 
 # ---------------------------------------------------------------------------
 # Output — generated artifacts
@@ -126,3 +130,5 @@ ai:
 output:
   docx_output_dir: "output/docs"
   docx_template_path: ""       # Optional: path to a .docx template file
+  docx_temp_retention_hours: 24   # How long failed-validation temp files are kept before deletion
+  docx_validation_required_sections: []  # e.g. ["EXPERIENCE", "SKILLS"] — empty means any non-empty body passes
