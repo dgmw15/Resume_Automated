@@ -20,7 +20,8 @@ htmlcov/
 auth/
 
 # Generated output (runtime artifacts — not source)
-job_automation/output/
+job_automation/output/docs/
+job_automation/output/prompts/
 job_automation/trawl.log
 job_automation/trawl_results.xlsx
 job_automation/trawl_results_enriched.xlsx
