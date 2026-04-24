@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import time
+import shutil
 
 
 async def is_selector_visible(page, selector: str, timeout_ms: int = 2_000) -> bool:
@@ -64,7 +65,21 @@ async def wait_with_progress(
     if stream is None:
         stream = sys.stdout
 
+    # Use in-place updates only for interactive terminals.
+    # On non-interactive streams (logs, captured output), emit just a final line.
+    is_tty = bool(getattr(stream, "isatty", lambda: False)())
+
+    # Keep the rendered line within terminal width to prevent line wrapping,
+    # which makes carriage-return updates look like many separate lines.
+    render_width = width
+    if is_tty:
+        cols = shutil.get_terminal_size(fallback=(100, 20)).columns
+        # Reserve room for label, framing, percent text, and a spacer.
+        reserved = len(label) + len(" [] 100%")
+        render_width = max(10, min(width, cols - reserved - 1))
+
     elapsed = 0
+    last_line_len = 0
     while elapsed < total_ms:
         remaining = total_ms - elapsed
         current_step = step_ms if remaining > step_ms else remaining
@@ -72,13 +87,17 @@ async def wait_with_progress(
         elapsed += current_step
 
         ratio = elapsed / total_ms
-        filled = int(width * ratio)
-        empty = width - filled
-        seconds_left = max(0, int((total_ms - elapsed) / 1000))
-        stream.write(
-            f"\r{label} [{'#' * filled}{'-' * empty}] {int(ratio * 100):3d}% ({seconds_left:3d}s left)"
-        )
-        stream.flush()
+        if is_tty:
+            filled = int(render_width * ratio)
+            empty = render_width - filled
+            line = f"{label} [{'#' * filled}{'-' * empty}] {int(ratio * 100):3d}%"
+            pad = " " * max(0, last_line_len - len(line))
+            stream.write(f"\r{line}{pad}")
+            stream.flush()
+            last_line_len = len(line)
 
-    stream.write("\n")
+    if not is_tty:
+        stream.write(f"{label} [{'#' * render_width}] 100%\n")
+    else:
+        stream.write("\n")
     stream.flush()
