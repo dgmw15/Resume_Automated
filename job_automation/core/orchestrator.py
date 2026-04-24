@@ -12,6 +12,7 @@ from adapters.base_adapter import SessionExpiredException
 from adapters.careersfuture import CareersFutureAdapter
 from adapters.indeed import IndeedAdapter
 from adapters.jobstreet import JobStreetAdapter
+from ai.employment_filter import EmploymentFilter
 from ai.jd_validator import build_validator_from_config
 from ai.provider_router import ProviderRouter
 from ai.tailor import ResumeTailor
@@ -121,6 +122,7 @@ class Orchestrator:
     async def run_forever(self) -> None:
         while True:
             await self._phase_scrape()
+            await self._phase_employment_filter()   # S5: runs before JD validation
             await self._phase_validate()
             await self._phase_batch()
             # Sleep before next cycle
@@ -198,6 +200,65 @@ class Orchestrator:
                     self.tracker.append(listing)
 
     # ------------------------------------------------------------------
+    # Phase 2a: Employment Type Filter  (Prompt S5)
+    # Runs before JD validation. Filtered rows never enter the AI queue.
+    # ------------------------------------------------------------------
+
+    async def _phase_employment_filter(self) -> None:
+        """
+        Apply employment-type filter to all SCRAPED rows.
+
+        Flow: SCRAPED → employment filter → (SCRAPED if PASSED/SKIPPED)
+        Filtered rows have employment_filter_status=FILTERED and are
+        excluded from the JD validation phase by checking that field.
+        When disabled (enabled=false) all rows are marked SKIPPED and pass through.
+        """
+        ef_cfg = self.config.get("employment_filter", {})
+        if not ef_cfg:
+            return
+
+        emp_filter = EmploymentFilter.from_config(self.config)
+
+        rows = self.tracker.get_by_status(JobStatus.SCRAPED)
+        if not rows:
+            return
+
+        passed = filtered = skipped = 0
+        for row in rows:
+            job_id = row.get("id")
+            if not job_id:
+                continue
+
+            result = emp_filter.classify(
+                title=row.get("role", ""),
+                description=row.get("raw_description", ""),
+            )
+
+            self.tracker.mark_employment_filter(
+                job_id=job_id,
+                status=result.status,
+                reason=result.reason,
+                emp_type_raw=result.employment_type_raw,
+                emp_type_normalized=result.employment_type_normalized,
+            )
+
+            if result.status == "FILTERED":
+                filtered += 1
+                logger.info(
+                    "[employment_filter] FILTERED job %s (%s): %s",
+                    job_id, row.get("role", ""), result.reason,
+                )
+            elif result.status == "SKIPPED":
+                skipped += 1
+            else:
+                passed += 1
+
+        logger.info(
+            "[employment_filter] Phase done: %d passed, %d filtered, %d skipped.",
+            passed, filtered, skipped,
+        )
+
+    # ------------------------------------------------------------------
     # Phase 2: JD Validation
     # ------------------------------------------------------------------
 
@@ -218,6 +279,10 @@ class Orchestrator:
         validator = build_validator_from_config(self.config, role=default_role)
 
         for row in rows:
+            # Skip rows already filtered by employment filter (S5)
+            if row.get("employment_filter_status") == "FILTERED":
+                continue
+
             job_id = row.get("id")
             raw_desc = row.get("raw_description") or ""
             if not job_id:

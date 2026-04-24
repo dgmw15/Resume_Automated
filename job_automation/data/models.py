@@ -42,6 +42,11 @@ class JobListing(BaseModel):
     status: JobStatus = JobStatus.NEW
     page_num: int = 1
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    # Employment type filter fields (S4)
+    employment_type_raw: Optional[str] = None
+    employment_type_normalized: Optional[str] = None   # "internship", "contract", "permanent", "unknown"
+    employment_filter_status: Optional[str] = None     # "PASSED", "FILTERED", "SKIPPED"
+    employment_filter_reason: Optional[str] = None
     # Validation fields
     validation_score: Optional[int] = None
     validation_reason: Optional[str] = None
@@ -68,4 +73,6 @@ class JobListing(BaseModel):
         "ai_provider_used", "cost_usd", "cost_reserved_usd", "cost_actual_usd",
         "reservation_id", "reservation_expires_at", "idempotency_key",
         "docx_path", "docx_validation_error", "processed_at",
+        "employment_type_raw", "employment_type_normalized",
+        "employment_filter_status", "employment_filter_reason",
     ]

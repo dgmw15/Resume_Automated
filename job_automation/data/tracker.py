@@ -19,6 +19,8 @@ COLUMNS = [
     "ai_provider_used", "cost_usd", "cost_reserved_usd", "cost_actual_usd",
     "reservation_id", "reservation_expires_at", "idempotency_key",
     "docx_path", "docx_validation_error", "processed_at",
+    "employment_type_raw", "employment_type_normalized",
+    "employment_filter_status", "employment_filter_reason",
 ]
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
@@ -252,6 +254,22 @@ class ExcelTracker:
             cost_usd=actual_usd,
             reservation_id=None,
             reservation_expires_at=None,
+        )
+
+    def mark_employment_filter(
+        self,
+        job_id: str,
+        status: str,
+        reason: str,
+        emp_type_raw: str = "",
+        emp_type_normalized: str = "unknown",
+    ) -> bool:
+        return self.update(
+            job_id,
+            employment_filter_status=status,
+            employment_filter_reason=reason,
+            employment_type_raw=emp_type_raw,
+            employment_type_normalized=emp_type_normalized,
         )
 
     def get_active_reservations(self) -> list[dict]:
