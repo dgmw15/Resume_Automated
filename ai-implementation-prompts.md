@@ -9,6 +9,229 @@ Goal of this pack:
 3. Replace Gemini path with OpenRouter and/or Claude with hard budget stop.
 4. Add dual prompt tracks (Data Analyst + Data Engineer).
 5. Generate DOCX outputs for downstream review and submission.
+6. Add salary extraction with explicit CareersFuture selector parsing.
+7. Add toggleable filtering for internships and contract roles.
+
+---
+
+## New Prompt Series: Salary + Employment Filter Implementation
+
+Use this series first for the newest scope. These prompts are additive and align with the latest automation plan and architecture diagrams.
+
+### Prompt S0: Scope Lock and Non-Regression Guardrails
+
+```text
+You are implementing only the latest scope in job_automation:
+1) salary extraction from CareersFuture,
+2) toggleable employment-type filtering for internship/contract roles.
+
+Rules:
+- Do not refactor unrelated modules.
+- Keep existing scraping flow and columns backward compatible.
+- Add missing columns without breaking existing Excel files.
+- Use deterministic parsing/filtering only (no LLM calls for these steps).
+- Add tests for every new parser/filter behavior.
+
+Deliverable:
+- A short implementation summary + exact files changed.
+```
+
+### Prompt S1: Add Salary Config + Selector Mapping
+
+```text
+Task: Extend config for salary extraction and selector mapping.
+
+Files to modify:
+1. job_automation/config.yaml
+
+Requirements:
+1. Ensure salary section exists with:
+   - capture_on_listing (bool)
+   - capture_on_detail_fallback (bool)
+   - default_currency (SGD)
+   - parse_locale (en-SG)
+   - enable_period_inference (bool)
+2. Add explicit CareersFuture selector mapping:
+   - salary.selectors.careersfuture.range = span[data-testid="salary-range"]
+   - salary.selectors.careersfuture.min_amount = span[data-testid="salary-range"] span.dib:nth-of-type(1)
+   - salary.selectors.careersfuture.max_amount = span[data-testid="salary-range"] span.dib:nth-of-type(2)
+3. Keep comments concise and practical.
+
+Deliverable:
+- Updated config.yaml with defaults and no schema regressions.
+```
+
+### Prompt S2: Implement Salary Parser + Tracker Columns
+
+```text
+Task: Implement salary parsing and persistence in trawl output.
+
+Files to modify:
+1. job_automation/trawl.py
+
+Requirements:
+1. Add salary columns to output schema (if missing):
+   - salary_raw
+   - salary_min
+   - salary_max
+   - salary_currency
+   - salary_period
+   - salary_status
+2. Implement parser helpers:
+   - parse_currency_and_amount(text) -> numeric + cleaned token
+   - parse_salary_range(raw_text, min_text, max_text)
+3. Use confirmed CareersFuture DOM behavior:
+   - wrapper: span[data-testid="salary-range"]
+   - first span.dib = min
+   - second span.dib = max (contains nested "to")
+4. Status behavior:
+   - OK when parsed
+   - MISSING when no salary wrapper/content
+   - AMBIGUOUS for non-numeric salary phrases
+   - ERROR only on unexpected parse exceptions
+5. If only min exists, set salary_min = salary_max.
+
+Deliverable:
+- Salary values written per row with deterministic status.
+```
+
+### Prompt S3: Wire CareersFuture Salary Extraction
+
+```text
+Task: Extract salary tokens from CareersFuture listing cards/detail pages and pass to salary parser.
+
+Files to modify:
+1. job_automation/trawl.py
+2. job_automation/adapters/careersfuture.py (if shared selector constants are needed)
+
+Requirements:
+1. On listing scrape, attempt to read salary wrapper and first/second amount spans.
+2. Save full wrapper text to salary_raw.
+3. Strip nested "to" label from second token before parse.
+4. If listing-level salary missing and detail fallback is enabled, attempt detail-page salary extraction.
+5. Do not fail the listing when salary cannot be parsed.
+
+Deliverable:
+- CareersFuture rows include salary fields whenever salary is present in DOM.
+```
+
+### Prompt S4: Add Toggleable Internship/Contract Filter
+
+```text
+Task: Add deterministic employment-type filtering with independent toggles.
+
+Files to modify:
+1. job_automation/config.yaml
+2. job_automation/ai/jd_validator.py
+3. job_automation/data/tracker.py
+4. job_automation/data/models.py (if needed)
+
+Requirements:
+1. Add config block employment_filter:
+   - enabled
+   - exclude_internship
+   - exclude_contract
+   - filter_stage (pre_validation)
+   - unknown_policy (allow)
+2. Add detection heuristics from title + description + tags:
+   - internship patterns: intern, internship, trainee, student
+   - contract patterns: contract, 6-month, 12-month, fixed-term
+3. Add tracker fields:
+   - employment_type_raw
+   - employment_type_normalized
+   - employment_filter_status (PASSED/FILTERED/SKIPPED)
+   - employment_filter_reason
+4. Behavior:
+   - Filter internship only when exclude_internship=true
+   - Filter contract only when exclude_contract=true
+   - When enabled=false set employment_filter_status=SKIPPED
+   - Unknown defaults to pass-through unless unknown_policy says otherwise
+
+Deliverable:
+- Rows are auditable with explicit filter decisions and reasons.
+```
+
+### Prompt S5: Integrate Filter Stage Into Runtime Flow
+
+```text
+Task: Place employment filtering in runtime before technical JD validation.
+
+Files to modify:
+1. job_automation/core/orchestrator.py
+2. job_automation/core/batch_processor.py (if stage assumptions require adjustment)
+
+Requirements:
+1. Flow order must be:
+   SCRAPED -> employment filter -> JD validation -> batch queue
+2. Filtered rows must never enter AI queue.
+3. Preserve existing logging style and add clear reason logs.
+4. Keep backward-compatible behavior when employment filtering is disabled.
+
+Deliverable:
+- Runtime honors toggle settings and prevents unwanted job types from AI processing.
+```
+
+### Prompt S6: Focused Test Pack For New Scope
+
+```text
+Task: Add tests for salary extraction and employment toggles.
+
+Files to add:
+1. job_automation/tests/test_salary_parser.py
+2. job_automation/tests/test_employment_filter.py
+
+Files to modify:
+1. existing relevant test modules as needed
+
+Requirements:
+1. Salary parser tests:
+   - "$4,500 to $6,500" range parsing
+   - single amount fallback min=max
+   - missing wrapper/status=MISSING
+   - non-numeric phrase/status=AMBIGUOUS
+2. Employment filter tests:
+   - internship filtered only when exclude_internship=true
+   - contract filtered only when exclude_contract=true
+   - both toggles false -> SKIPPED/pass-through
+   - unknown type behavior follows unknown_policy
+3. Add one integration-style test proving filtered rows never reach AI queue.
+
+Deliverable:
+- Deterministic tests that lock in new behavior.
+```
+
+### Prompt S7: Final Integration and Runbook Update
+
+```text
+Task: Finalize integration and add concise run instructions for the new features.
+
+Files to modify:
+1. job_automation/README.md (or docs/developer_guide.md if preferred)
+2. job_automation/core/orchestrator.py (only if final wiring is pending)
+
+Requirements:
+1. Document how to toggle:
+   - salary capture options
+   - exclude_internship
+   - exclude_contract
+2. Include expected tracker columns and statuses.
+3. Provide one quick smoke-test command sequence.
+4. Verify no unresolved TODOs in modified files.
+
+Deliverable:
+- Implementation complete with runnable usage notes.
+```
+
+### Recommended Order For New Scope
+
+1. Prompt S0
+2. Prompt S1
+3. Prompt S2
+4. Prompt S3
+5. Prompt S4
+6. Prompt S5
+7. Prompt S6
+8. Prompt S7
 
 ---
 
@@ -193,6 +416,7 @@ Requirements:
 2. Validator should:
    - normalize text
    - count technical keyword hits from selected role profile
+   - select role profile per row from role/title metadata (do not use one global default)
    - detect deny patterns
    - fail when deny pattern is present OR keyword hits below threshold
 3. Add clear logging for pass/fail.
@@ -200,6 +424,7 @@ Requirements:
    - clearly technical JD
    - clearly insurance-sales JD
    - mixed JD with borderline keyword count
+   - analyst/engineer role profile selection differences for same JD text
 
 Deliverable:
 - Working validator module and tests.
@@ -288,9 +513,11 @@ Requirements:
    - enforce atomic reservation updates across concurrent workers
    - expire stale reservations based on cost_lock_timeout_seconds
    - define budget boundary semantics (timezone/reset/precision/rounding)
+   - ensure lock implementation is Windows-safe and POSIX-safe (no hard dependency on fcntl import on Windows)
 4. Update tailor path to use ProviderRouter.
 5. Keep retries with backoff for transient network/API failures.
 6. Add idempotency key support to prevent duplicate provider charges on retries.
+7. Write reservation lifecycle fields back to tracker rows on reserve/commit/release.
 
 Deliverable:
 - Gemini no longer required in active execution path.
@@ -323,8 +550,9 @@ Requirements:
    - role_hint
    - classifier
 3. Default to role_hint using job title + configured role mappings.
-4. Persist selected track to tracker field pipeline_track.
-5. Add tests for route selection and prompt formatting.
+4. Read active pipeline mode from config (`ai.pipeline_mode`) and log selected mode per job.
+5. Persist selected track to tracker field pipeline_track.
+6. Add tests for route selection and prompt formatting.
 
 Deliverable:
 - Each processed job is tagged and generated via analyst or engineer prompt track.
@@ -454,6 +682,8 @@ Requirements:
 7. Add stale reservation cleanup test.
 8. Add DOCX corrupted/empty output validation-failure test.
 9. Add idempotency test for duplicated retry execution.
+10. Add test-suite contract checks ensuring tests reference only existing public symbols.
+11. Add Windows runtime test for budget-ledger import/startup path.
 
 Deliverable:
 - Tests pass locally and validate critical behavior.
@@ -517,6 +747,7 @@ Requirements:
    - reservation_expires_at
    - cost_reserved_usd
    - cost_actual_usd
+7. Ensure replay behavior returns previously committed logical result payload, not placeholder text.
 
 Deliverable:
 - Provider calls are blocked unless reservation succeeds, with deterministic cap enforcement across concurrent workers.
@@ -550,6 +781,7 @@ Requirements:
    - keep temporary artifact only within configured retention window
 4. Add retention cleanup behavior for temp artifacts.
 5. Do not set DOCX_READY unless final move and validation are complete.
+6. Wire cleanup invocation on batch/orchestrator cadence so retention policy is actually enforced.
 
 Deliverable:
 - Corrupted, partial, or empty DOCX outputs never reach DOCX_READY.
@@ -613,6 +845,8 @@ Requirements:
    - corrupted/empty/partial output must fail validation
    - status must be DOCX_GENERATION_FAILED with error recorded
 5. Keep tests fast, deterministic, and isolated from live provider APIs.
+6. Add API-drift tests so `test_provider_router.py` and `test_docx_renderer.py` fail fast when they import missing symbols.
+7. Add Windows portability test proving budget-ledger initialization does not raise import errors.
 
 Deliverable:
 - Test suite proves critical failure modes are guarded in code.
