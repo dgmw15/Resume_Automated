@@ -122,6 +122,7 @@ class Orchestrator:
     async def run_forever(self) -> None:
         while True:
             await self._phase_scrape()
+            await self._phase_data_check()          # C2: optional pre-pipeline gate
             await self._phase_employment_filter()   # S5: runs before JD validation
             await self._phase_validate()
             await self._phase_batch()
@@ -198,6 +199,48 @@ class Orchestrator:
                         listing.status = JobStatus.MISSING
 
                     self.tracker.append(listing)
+
+    # ------------------------------------------------------------------
+    # Phase 1b: Data Completeness Check  (Prompt C2)
+    # Optional pre-pipeline gate. Runs after scrape, before employment filter.
+    # Controlled by data_checker.enabled + data_checker.run_stage in config.
+    # ------------------------------------------------------------------
+
+    async def _phase_data_check(self) -> None:
+        """
+        Run the data completeness checker on configured target workbooks.
+
+        Behaviour is fully config-driven:
+          data_checker.enabled=false  → skipped silently
+          data_checker.mode=audit_only → report only, no writes
+          data_checker.mode=recover   → backfill recoverable salary fields
+          data_checker.dry_run=true   → reports produced but workbook not mutated
+        """
+        dc_cfg = self.config.get("data_checker", {})
+        if not dc_cfg.get("enabled", False):
+            return
+
+        run_stage = dc_cfg.get("run_stage", "pre_pipeline")
+        if run_stage != "pre_pipeline":
+            return
+
+        try:
+            from core.data_checker import DataChecker
+            checker = DataChecker.from_config(self.config)
+            reports = await checker.run()
+            for report in reports:
+                counts = report.outcome_counts
+                logger.info(
+                    "[data_checker] %s: COMPLETE=%d RECOVERED=%d UNRESOLVED=%d",
+                    report.workbook_path,
+                    counts.get("COMPLETE", 0),
+                    counts.get("RECOVERED_LOCAL", 0) + counts.get("RECOVERED_REFETCH", 0),
+                    counts.get("UNRESOLVED", 0),
+                )
+        except Exception as exc:
+            logger.warning(
+                "[data_checker] Phase skipped due to error: %s — pipeline continues.", exc
+            )
 
     # ------------------------------------------------------------------
     # Phase 2a: Employment Type Filter  (Prompt S5)
