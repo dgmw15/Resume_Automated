@@ -1,55 +1,271 @@
 """
 output/docx_renderer.py — Renders tailored resume text to .docx files.
 
-Safe write workflow (Prompt 12)
---------------------------------
-1. Write to a temporary file (.tmp.docx) in the output directory.
-2. Re-open the temp file and validate:
-   a. File opens without exception.
-   b. Body is non-empty (at least one non-whitespace paragraph).
-   c. All required sections (from config) are present in the text.
-3. Atomically rename temp → final path only after validation passes.
-4. On validation failure:
-   - Status is set to DOCX_GENERATION_FAILED by the caller.
-   - Temp file is retained for up to docx_temp_retention_hours for debugging.
-   - A DocxValidationError is raised with a descriptive message.
+Safe write workflow
+-------------------
+1. Sanitise input text and validate job_id.
+2. Write to a temp file (.tmp.docx) in the output directory.
+3. Re-open and validate the temp file (non-empty, required sections).
+4. Atomically rename temp → final path only after validation passes.
+5. On failure: retain temp for debugging (within retention window), raise
+   DocxValidationError so the caller can set DOCX_GENERATION_FAILED.
 
-File path pattern: output/docs/{job_id}.docx
+Smart resume formatting
+-----------------------
+Lines are classified before writing so the DOCX has structure:
+  - NAME    → bold, 14pt
+  - CONTACT → 10pt, grey-ish
+  - SECTION → bold, 12pt, all-caps
+  - ROLE    → italic, 11pt (employer | title | dates pattern)
+  - BULLET  → 11pt, leading dash stripped
+  - BODY    → 11pt
+  - EMPTY   → spacer paragraph
+
+Security
+--------
+  - _validate_job_id() rejects path-traversal characters, null bytes, spaces
+  - _validate_output_path() ensures the resolved final path stays inside output_dir
+  - _sanitise_content() strips control chars, XML tags, markdown syntax, caps length
 """
 from __future__ import annotations
 
+import enum
 import logging
+import re
 import shutil
-import tempfile
-import time
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
 from docx import Document
-from docx.shared import Pt
+from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = Path("output/docs")
 DEFAULT_TEMP_RETENTION_HOURS = 24
+_MAX_JOB_ID_LEN = 128
+_MAX_CONTENT_LEN = 50_000
 
+# Known section header keywords (title-cased forms; matched case-insensitively)
+_SECTION_KEYWORDS = frozenset({
+    "experience", "work experience", "education", "skills", "summary",
+    "professional summary", "objective", "certifications", "projects",
+    "achievements", "awards", "languages", "interests", "references",
+    "employment", "qualifications", "profile",
+})
+
+# Regex that identifies a role/employer line: contains "|" or "–" with date-ish text
+_ROLE_RE = re.compile(
+    r"(?:[|–\-].*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|present))",
+    re.IGNORECASE,
+)
+
+# Job-id allowed characters: alphanumeric, dash, underscore; must start with alnum
+_JOB_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,127}$')
+
+# Strip XML/HTML tags
+_XML_TAG_RE = re.compile(r"<[^>]+>")
+# Strip markdown: bold (**), italic (single _), inline code (`)
+_MARKDOWN_RE = re.compile(r"(\*\*|__|\*|_|`|#+\s*)")
+
+
+# ---------------------------------------------------------------------------
+# Public types
+# ---------------------------------------------------------------------------
 
 class DocxValidationError(Exception):
     """Raised when a generated DOCX fails the content validation gate."""
 
 
+class _LineType(enum.Enum):
+    NAME = "name"
+    CONTACT = "contact"
+    SECTION = "section"
+    ROLE = "role"
+    BULLET = "bullet"
+    BODY = "body"
+    EMPTY = "empty"
+
+
+class _ClassifiedLine:
+    __slots__ = ("text", "kind")
+
+    def __init__(self, text: str, kind: _LineType) -> None:
+        self.text = text
+        self.kind = kind
+
+
+# ---------------------------------------------------------------------------
+# Security helpers (public for test import)
+# ---------------------------------------------------------------------------
+
+def _validate_job_id(job_id: object) -> str:
+    """
+    Validate and return the job_id string.
+
+    Raises ValueError for:
+    - Non-string input
+    - Empty string
+    - Path-traversal characters (/, \\, ..)
+    - Null bytes or spaces
+    - Leading special characters (dash, underscore)
+    - Length > 128 characters
+    """
+    if not isinstance(job_id, str):
+        raise ValueError(f"job_id must be a str, got {type(job_id).__name__!r}")
+    if not job_id:
+        raise ValueError("job_id must not be empty.")
+    if "\x00" in job_id:
+        raise ValueError("job_id contains a null byte.")
+    if " " in job_id:
+        raise ValueError("job_id must not contain spaces.")
+    if "/" in job_id or "\\" in job_id:
+        raise ValueError("job_id must not contain path separators.")
+    if ".." in job_id:
+        raise ValueError("job_id must not contain '..'.")
+    if not _JOB_ID_RE.match(job_id):
+        raise ValueError(
+            f"job_id {job_id!r} is invalid. Must start with alphanumeric and "
+            "contain only letters, digits, dashes, or underscores (max 128 chars)."
+        )
+    return job_id
+
+
+def _validate_output_path(output_dir: Path, filename: str) -> Path:
+    """
+    Resolve the full output path and verify it stays inside output_dir.
+
+    Raises ValueError if the resolved path escapes the output directory.
+    """
+    resolved_dir = Path(output_dir).resolve()
+    resolved_path = (resolved_dir / filename).resolve()
+    if not str(resolved_path).startswith(str(resolved_dir)):
+        raise ValueError(
+            f"Output path {resolved_path!r} escapes output directory {resolved_dir!r}."
+        )
+    return resolved_path
+
+
+def _sanitise_content(text: object) -> str:
+    """
+    Sanitise resume text before writing to DOCX.
+
+    Raises TypeError for non-string input.
+
+    Steps:
+    1. Normalise Windows line endings to LF.
+    2. Strip control characters (except LF/TAB).
+    3. Strip XML/HTML tags.
+    4. Strip markdown syntax (**, *, _, `, #).
+    5. Cap length at _MAX_CONTENT_LEN characters.
+    """
+    if not isinstance(text, str):
+        raise TypeError(f"content must be a str, got {type(text).__name__!r}")
+
+    # Normalise Windows line endings
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Strip control characters except LF (\n) and TAB (\t)
+    text = re.sub(r"[^\S\n\t]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+
+    # Strip XML/HTML tags
+    text = _XML_TAG_RE.sub("", text)
+
+    # Strip markdown syntax
+    text = _MARKDOWN_RE.sub("", text)
+
+    # Cap length
+    if len(text) > _MAX_CONTENT_LEN:
+        text = text[:_MAX_CONTENT_LEN]
+
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Line classifier (public for test import)
+# ---------------------------------------------------------------------------
+
+def _classify_lines(lines: list[str]) -> list[_ClassifiedLine]:
+    """
+    Classify a list of text lines into _LineType categories.
+
+    Classification rules (evaluated in order):
+    1. Empty line → EMPTY
+    2. First non-empty line → NAME
+    3. Line contains '@' with no spaces → CONTACT
+    4. All-caps line (≥2 words or a known keyword) → SECTION
+    5. Known section keyword (title-cased) → SECTION
+    6. Matches role pattern (contains '|' or '–' with date-ish text) → ROLE
+    7. Starts with '-' or '•' → BULLET
+    8. Otherwise → BODY
+    """
+    result: list[_ClassifiedLine] = []
+    name_seen = False
+
+    for line in lines:
+        stripped = line.strip()
+
+        if not stripped:
+            result.append(_ClassifiedLine("", _LineType.EMPTY))
+            continue
+
+        # NAME: first non-empty line
+        if not name_seen:
+            name_seen = True
+            result.append(_ClassifiedLine(stripped, _LineType.NAME))
+            continue
+
+        # CONTACT: contains '@' (email) or looks like a phone/URL contact
+        if "@" in stripped and " " not in stripped:
+            result.append(_ClassifiedLine(stripped, _LineType.CONTACT))
+            continue
+
+        # SECTION: all-caps (letters only), or known keyword
+        words_only = re.sub(r"[^A-Za-z ]", "", stripped)
+        if words_only.strip() and words_only.strip() == words_only.strip().upper():
+            result.append(_ClassifiedLine(stripped.upper(), _LineType.SECTION))
+            continue
+
+        if stripped.lower() in _SECTION_KEYWORDS:
+            result.append(_ClassifiedLine(stripped.upper(), _LineType.SECTION))
+            continue
+
+        # ROLE: employer | title | dates
+        if _ROLE_RE.search(stripped):
+            result.append(_ClassifiedLine(stripped, _LineType.ROLE))
+            continue
+
+        # BULLET
+        if stripped.startswith(("-", "•", "*")):
+            bullet_text = re.sub(r"^[-•*]\s*", "", stripped)
+            result.append(_ClassifiedLine(bullet_text, _LineType.BULLET))
+            continue
+
+        # Default: BODY
+        result.append(_ClassifiedLine(stripped, _LineType.BODY))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Main renderer
+# ---------------------------------------------------------------------------
+
 class DocxRenderer:
     """
-    Writes plain-text tailored resumes to DOCX files with an atomic
-    write-validate-move pipeline to prevent silent corruption.
+    Writes plain-text tailored resumes to DOCX files with:
+    - Smart line classification and formatting
+    - Input sanitisation and job_id validation
+    - Atomic write-validate-move pipeline
+    - Idempotent rendering (skips valid existing files)
 
     Args:
         output_dir:             directory where final files are saved.
         template_path:          optional path to a .docx template file.
         required_sections:      list of strings that must appear (case-insensitive)
-                                in the DOCX body text before it is accepted.
-                                Empty list → only non-empty body is required.
+                                in the DOCX body text.  Empty → only non-empty body required.
         temp_retention_hours:   how long failed-validation temp files are kept.
     """
 
@@ -62,7 +278,11 @@ class DocxRenderer:
     ) -> None:
         self._output_dir = Path(output_dir)
         self._output_dir.mkdir(parents=True, exist_ok=True)
-        self._template_path = Path(template_path) if template_path else None
+        self._template_path = (
+            Path(template_path)
+            if template_path and Path(template_path).suffix.lower() == ".docx"
+            else None
+        )
         self._required_sections: list[str] = [
             s.lower() for s in (required_sections or [])
         ]
@@ -74,43 +294,41 @@ class DocxRenderer:
 
     def render(self, job_id: str, tailored_text: str) -> Path:
         """
-        Write tailored_text to output_dir/{job_id}.docx.
+        Sanitise, write, validate, and atomically move a DOCX.
 
-        Workflow: write → validate → atomic move.
-
-        Returns the Path of the final file on success.
-        Raises DocxValidationError if content validation fails.
-        Raises IOError if the file cannot be written.
+        Returns the final Path on success.
+        Raises DocxValidationError on content validation failure.
+        Raises IOError on unexpected write errors.
         """
-        final_path = self._output_dir / f"{job_id}.docx"
+        job_id = _validate_job_id(job_id)
+        safe_text = _sanitise_content(tailored_text)
 
-        # Idempotency: if the final file already exists and is valid, return it.
+        final_path = _validate_output_path(self._output_dir, f"{job_id}.docx")
+
+        # Idempotency: return existing valid file
         if final_path.exists():
             try:
                 self._validate(final_path)
-                logger.info("DOCX already exists and valid — skipping re-render: %s", final_path)
+                logger.info("DOCX already valid — skipping re-render: %s", final_path)
                 return final_path
             except DocxValidationError:
                 logger.warning("Existing DOCX failed validation — re-rendering: %s", final_path)
 
-        # Write to temp file in the same directory (same filesystem → atomic rename)
-        tmp_path = self._output_dir / f"{job_id}.tmp.docx"
+        tmp_path = _validate_output_path(self._output_dir, f"{job_id}.tmp.docx")
+
         try:
             doc = self._load_template_or_new()
-            self._write_content(doc, tailored_text)
+            self._write_content(doc, safe_text)
             doc.save(str(tmp_path))
             logger.debug("DOCX temp written: %s", tmp_path)
 
-            # Validate before promoting
             self._validate(tmp_path)
 
-            # Atomic move: rename is atomic on POSIX, near-atomic on Windows
             shutil.move(str(tmp_path), str(final_path))
             logger.info("DOCX ready: %s", final_path)
             return final_path
 
         except DocxValidationError:
-            # Retain temp for debugging; caller sets DOCX_GENERATION_FAILED
             logger.warning(
                 "DOCX validation failed for job %s — temp retained at %s (for %dh)",
                 job_id, tmp_path, self._temp_retention_hours,
@@ -118,7 +336,6 @@ class DocxRenderer:
             raise
 
         except Exception as exc:
-            # Clean up temp on unexpected errors
             if tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
             raise IOError(f"DOCX write failed for job {job_id}: {exc}") from exc
@@ -126,7 +343,7 @@ class DocxRenderer:
     def cleanup_stale_temps(self) -> int:
         """
         Delete .tmp.docx files older than temp_retention_hours.
-        Returns the number of files deleted.
+        Returns the count of files deleted.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(hours=self._temp_retention_hours)
         deleted = 0
@@ -146,40 +363,63 @@ class DocxRenderer:
 
     def _load_template_or_new(self) -> Document:
         if self._template_path and self._template_path.exists():
-            return Document(str(self._template_path))
+            try:
+                return Document(str(self._template_path))
+            except Exception:
+                logger.warning("Template load failed — falling back to blank document.")
         return Document()
 
     def _write_content(self, doc: Document, text: str) -> None:
-        """Write each line of resume text as a paragraph with 11pt font."""
-        for line in text.splitlines():
-            para = doc.add_paragraph(line)
-            for run in para.runs:
+        """Classify lines and write with appropriate formatting."""
+        lines = text.splitlines()
+        classified = _classify_lines(lines)
+
+        for cl in classified:
+            para = doc.add_paragraph()
+            if cl.kind == _LineType.EMPTY:
+                continue  # leave paragraph empty as spacer
+
+            run = para.add_run(cl.text)
+
+            if cl.kind == _LineType.NAME:
+                run.bold = True
+                run.font.size = Pt(14)
+
+            elif cl.kind == _LineType.CONTACT:
+                run.font.size = Pt(10)
+                run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+            elif cl.kind == _LineType.SECTION:
+                run.bold = True
+                run.font.size = Pt(12)
+
+            elif cl.kind == _LineType.ROLE:
+                run.italic = True
+                run.font.size = Pt(11)
+
+            elif cl.kind == _LineType.BULLET:
+                para.style = doc.styles["List Bullet"] if "List Bullet" in [s.name for s in doc.styles] else para.style
+                run.font.size = Pt(11)
+
+            else:  # BODY
                 run.font.size = Pt(11)
 
     def _validate(self, path: Path) -> None:
         """
-        Validate that path is a readable, non-empty DOCX with required sections.
-
-        Raises DocxValidationError describing the first failure found.
+        Validate a DOCX file for readability and content.
+        Raises DocxValidationError on failure.
         """
-        # 1. File opens without exception
         try:
             doc = Document(str(path))
         except Exception as exc:
             raise DocxValidationError(f"DOCX could not be opened: {exc}") from exc
 
-        # 2. Non-empty body
         body_text = "\n".join(p.text for p in doc.paragraphs)
         if not body_text.strip():
             raise DocxValidationError("DOCX body is empty — no paragraphs found.")
 
-        # 3. Required sections present
         body_lower = body_text.lower()
-        missing = [
-            section
-            for section in self._required_sections
-            if section not in body_lower
-        ]
+        missing = [s for s in self._required_sections if s not in body_lower]
         if missing:
             raise DocxValidationError(
                 f"DOCX is missing required section(s): {missing}"
@@ -193,7 +433,9 @@ def build_renderer_from_config(config: dict) -> DocxRenderer:
     template_path_str = out_cfg.get("docx_template_path", "")
     template_path = Path(template_path_str) if template_path_str else None
     required_sections: list[str] = out_cfg.get("docx_validation_required_sections", [])
-    temp_retention_hours: int = int(out_cfg.get("docx_temp_retention_hours", DEFAULT_TEMP_RETENTION_HOURS))
+    temp_retention_hours: int = int(
+        out_cfg.get("docx_temp_retention_hours", DEFAULT_TEMP_RETENTION_HOURS)
+    )
     return DocxRenderer(
         output_dir=output_dir,
         template_path=template_path,
