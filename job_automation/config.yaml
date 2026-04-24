@@ -43,6 +43,31 @@ session:
   reauth_buffer_minutes: 5   # Re-authenticate this many minutes before expiry
 
 # ---------------------------------------------------------------------------
+# Salary extraction — CareersFuture selector-driven parsing
+# ---------------------------------------------------------------------------
+salary:
+  capture_on_listing: true          # Attempt salary extraction on listing cards
+  capture_on_detail_fallback: true  # Try detail page if listing-level salary is missing
+  default_currency: "SGD"
+  parse_locale: "en-SG"
+  enable_period_inference: true     # Infer monthly/annual from raw text context
+  selectors:
+    careersfuture:
+      range: "span[data-testid='salary-range']"
+      min_amount: "span[data-testid='salary-range'] span.dib:nth-of-type(1)"
+      max_amount: "span[data-testid='salary-range'] span.dib:nth-of-type(2)"
+
+# ---------------------------------------------------------------------------
+# Employment type filtering — internship and contract toggles
+# ---------------------------------------------------------------------------
+employment_filter:
+  enabled: true
+  exclude_internship: true       # Filter out internship/trainee roles
+  exclude_contract: false        # Filter out contract/fixed-term roles
+  filter_stage: "pre_validation" # Applied before JD technical validation
+  unknown_policy: "allow"        # "allow" or "deny" when type cannot be determined
+
+# ---------------------------------------------------------------------------
 # Validation — deterministic JD relevance gate (no AI calls)
 # ---------------------------------------------------------------------------
 validation:

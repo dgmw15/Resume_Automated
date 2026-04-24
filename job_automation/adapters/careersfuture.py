@@ -30,6 +30,10 @@ CSS_JOB_CARD    = 'a[data-testid="job-card-link"]'           # ✅ card wrapper 
 CSS_CARD_TITLE   = 'span[data-testid="job-card__job-title"]' # ✅ job title inside card
 CSS_CARD_COMPANY = 'p[data-testid="company-hire-info"]'      # ✅ company name inside card
 CSS_JOB_DESCRIPTION = 'div[data-testid="description-content"]'  # ✅ full description body
+# ── Salary selectors (S2/S3) ───────────────────────────────────────────────────
+CSS_SALARY_RANGE = 'span[data-testid="salary-range"]'
+CSS_SALARY_MIN   = 'span[data-testid="salary-range"] span.dib:nth-of-type(1)'
+CSS_SALARY_MAX   = 'span[data-testid="salary-range"] span.dib:nth-of-type(2)'
 # ── Login ──────────────────────────────────────────────────────────────────────
 MCF_HOME_URL  = "https://www.mycareersfuture.gov.sg/search?page=0"
 CSS_LOGIN_BTN = 'button[data-testid="navbar-login"]'   # ✅ confirmed

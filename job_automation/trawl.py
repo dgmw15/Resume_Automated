@@ -34,6 +34,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from playwright.async_api import async_playwright
 from core.login_utils import wait_with_progress
+from core.salary_parser import parse_salary_range
 
 # ---------------------------------------------------------------------------
 # Browser check — give a plain-English fix if Chromium isn't installed
@@ -88,6 +89,8 @@ DEFAULT_OUT   = Path("trawl_results.xlsx")
 COLUMNS = [
     "id", "scraped_at", "portal", "role", "company",
     "url", "page_num", "raw_description", "description_status", "notes", "skills", "continue",
+    # Salary fields (S2)
+    "salary_raw", "salary_min", "salary_max", "salary_currency", "salary_period", "salary_status",
 ]
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")
@@ -198,6 +201,9 @@ async def scrape_careersfuture(
         CSS_CARD_TITLE,
         CSS_CARD_COMPANY,
         CSS_JOB_DESCRIPTION,
+        CSS_SALARY_RANGE,
+        CSS_SALARY_MIN,
+        CSS_SALARY_MAX,
         MCF_HOME_URL,
         CSS_LOGIN_BTN,
         TIMEOUT_MS,
@@ -301,8 +307,29 @@ async def scrape_careersfuture(
                             href    = await card.get_attribute("href")
                             if href and not href.startswith("http"):
                                 href = "https://www.mycareersfuture.gov.sg" + href
+
+                            # Salary extraction from listing card (S3)
+                            salary_raw = salary_min_text = salary_max_text = ""
+                            try:
+                                sal_el  = await card.query_selector(CSS_SALARY_RANGE)
+                                min_el  = await card.query_selector(CSS_SALARY_MIN)
+                                max_el  = await card.query_selector(CSS_SALARY_MAX)
+                                if sal_el:
+                                    salary_raw = (await sal_el.inner_text()).strip()
+                                if min_el:
+                                    salary_min_text = (await min_el.inner_text()).strip()
+                                if max_el:
+                                    salary_max_text = (await max_el.inner_text()).strip()
+                            except Exception:
+                                pass  # salary not found on card — fallback handled below
+
                             if href:
-                                listings.append({"role": title, "company": company, "url": href})
+                                listings.append({
+                                    "role": title, "company": company, "url": href,
+                                    "salary_raw": salary_raw,
+                                    "salary_min_text": salary_min_text,
+                                    "salary_max_text": salary_max_text,
+                                })
                         except Exception as exc:
                             logger.warning("[careersfuture] Card parse error: %s", exc)
 
@@ -316,6 +343,16 @@ async def scrape_careersfuture(
                             logger.debug("[careersfuture] Skipping duplicate: %s", job_url)
                             continue
 
+                        # Parse salary from listing card data
+                        sal_cfg = config.get("salary", {})
+                        sal_result = parse_salary_range(
+                            raw_text=listing.get("salary_raw", ""),
+                            min_text=listing.get("salary_min_text", ""),
+                            max_text=listing.get("salary_max_text", ""),
+                            default_currency=sal_cfg.get("default_currency", "SGD"),
+                            enable_period_inference=sal_cfg.get("enable_period_inference", True),
+                        )
+
                         row = {
                             "id":          str(uuid.uuid4()),
                             "scraped_at":  datetime.utcnow().isoformat(),
@@ -327,6 +364,13 @@ async def scrape_careersfuture(
                             "raw_description":   "",
                             "description_status": "PENDING",
                             "notes":       "",
+                            # Salary (from card)
+                            "salary_raw":      sal_result.salary_raw,
+                            "salary_min":      sal_result.salary_min,
+                            "salary_max":      sal_result.salary_max,
+                            "salary_currency": sal_result.salary_currency,
+                            "salary_period":   sal_result.salary_period,
+                            "salary_status":   sal_result.salary_status,
                         }
 
                         if fetch_descriptions:
@@ -341,6 +385,31 @@ async def scrape_careersfuture(
                                 else:
                                     row["description_status"] = "MISSING"
                                     row["notes"] = "Description element not found"
+
+                                # Detail-page salary fallback (S3): only if card salary was missing
+                                if sal_result.salary_status == "MISSING" and sal_cfg.get("capture_on_detail_fallback", True):
+                                    try:
+                                        sal_range_el = await desc_page.query_selector(CSS_SALARY_RANGE)
+                                        sal_min_el   = await desc_page.query_selector(CSS_SALARY_MIN)
+                                        sal_max_el   = await desc_page.query_selector(CSS_SALARY_MAX)
+                                        raw_fb   = (await sal_range_el.inner_text()).strip() if sal_range_el else ""
+                                        min_fb   = (await sal_min_el.inner_text()).strip()   if sal_min_el   else ""
+                                        max_fb   = (await sal_max_el.inner_text()).strip()   if sal_max_el   else ""
+                                        if raw_fb:
+                                            fb_result = parse_salary_range(
+                                                raw_text=raw_fb, min_text=min_fb, max_text=max_fb,
+                                                default_currency=sal_cfg.get("default_currency", "SGD"),
+                                                enable_period_inference=sal_cfg.get("enable_period_inference", True),
+                                            )
+                                            row["salary_raw"]      = fb_result.salary_raw
+                                            row["salary_min"]      = fb_result.salary_min
+                                            row["salary_max"]      = fb_result.salary_max
+                                            row["salary_currency"] = fb_result.salary_currency
+                                            row["salary_period"]   = fb_result.salary_period
+                                            row["salary_status"]   = fb_result.salary_status
+                                    except Exception:
+                                        pass  # salary fallback is best-effort
+
                             except Exception as exc:
                                 row["description_status"] = "ERROR"
                                 row["notes"] = str(exc)
