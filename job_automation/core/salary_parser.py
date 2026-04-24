@@ -56,7 +56,9 @@ class SalaryResult:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def parse_currency_and_amount(text: str) -> tuple[str, Optional[float]]:
+def parse_currency_and_amount(
+    text: str, default_currency: str = "SGD"
+) -> tuple[str, Optional[float]]:
     """
     Extract a currency code and numeric amount from a text token.
 
@@ -65,15 +67,15 @@ def parse_currency_and_amount(text: str) -> tuple[str, Optional[float]]:
     Examples:
         "$4,500"   → ("SGD", 4500.0)
         "S$6,500"  → ("SGD", 6500.0)
-        "4500"     → ("SGD", 4500.0)
+        "4500"     → ("SGD", 4500.0)  — default_currency applied
         "4.5k"     → ("SGD", 4500.0)
         "To"       → ("SGD", None)
     """
     if not text or not isinstance(text, str):
-        return ("SGD", None)
+        return (default_currency, None)
 
     cleaned = text.strip()
-    currency = "SGD"  # default
+    currency = default_currency
 
     # Detect currency prefix
     for symbol, code in sorted(_CURRENCY_SYMBOLS.items(), key=lambda x: -len(x[0])):
@@ -140,8 +142,8 @@ def parse_salary_range(
             result.salary_period = _infer_period(raw_text)
 
         # Parse min amount
-        currency_min, min_val = parse_currency_and_amount(min_text)
-        currency_max, max_val = parse_currency_and_amount(clean_max)
+        currency_min, min_val = parse_currency_and_amount(min_text, default_currency)
+        currency_max, max_val = parse_currency_and_amount(clean_max, default_currency)
 
         # If span-level tokens failed, fall back to extracting from raw_text
         if min_val is None and max_val is None:

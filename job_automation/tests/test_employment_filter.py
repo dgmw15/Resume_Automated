@@ -83,12 +83,12 @@ class TestInternshipFiltering:
 
     def test_student_programme_filtered(self):
         ef = _make_filter(exclude_internship=True)
-        result = ef.classify(description="Student programme for undergraduates.")
+        result = ef.classify(title="", description="Student programme for undergraduates.")
         assert result.status == "FILTERED"
 
     def test_industrial_placement_filtered(self):
         ef = _make_filter(exclude_internship=True)
-        result = ef.classify(description="Industrial placement for engineering students.")
+        result = ef.classify(title="", description="Industrial placement for engineering students.")
         assert result.status == "FILTERED"
 
     def test_intern_toggle_false_passes(self):
@@ -125,18 +125,18 @@ class TestContractFiltering:
 
     def test_six_month_filtered(self):
         ef = _make_filter(exclude_contract=True)
-        result = ef.classify(description="This is a 6-month contract role.")
+        result = ef.classify(title="", description="This is a 6-month contract role.")
         assert result.status == "FILTERED"
         assert result.employment_type_normalized == "contract"
 
     def test_twelve_month_filtered(self):
         ef = _make_filter(exclude_contract=True)
-        result = ef.classify(description="12-month fixed-term engagement.")
+        result = ef.classify(title="", description="12-month fixed-term engagement.")
         assert result.status == "FILTERED"
 
     def test_fixed_term_filtered(self):
         ef = _make_filter(exclude_contract=True)
-        result = ef.classify(description="Fixed-term appointment of 1 year.")
+        result = ef.classify(title="", description="Fixed-term appointment of 1 year.")
         assert result.status == "FILTERED"
 
     def test_temporary_filtered(self):
