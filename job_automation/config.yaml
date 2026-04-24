@@ -157,3 +157,37 @@ output:
   docx_template_path: ""       # Optional: path to a .docx template file
   docx_temp_retention_hours: 24   # How long failed-validation temp files are kept before deletion
   docx_validation_required_sections: []  # e.g. ["EXPERIENCE", "SKILLS"] — empty means any non-empty body passes
+
+# ---------------------------------------------------------------------------
+# Data completeness checker — audit and optional deterministic backfill
+# Phase A/B: trawl workbook only. Phase D: extend to tracker after schema parity.
+# ---------------------------------------------------------------------------
+data_checker:
+  enabled: false                  # Master toggle. Set true to run checker on startup.
+  run_stage: "pre_pipeline"       # When to run: "pre_pipeline" (after scrape, before filters)
+
+  # Mode controls
+  mode: "audit_only"              # "audit_only" (report, no writes) | "recover" (backfill + report)
+  dry_run: true                   # Always default to dry-run. Set false only when ready to mutate.
+
+  # Target workbooks — Phase A/B: trawl only. Extend to tracker in Phase D.
+  targets:
+    - "trawl_results.xlsx"
+    # - "Database.xlsx"           # Uncomment in Phase D after tracker gains salary schema parity
+
+  # Backup behaviour
+  write_backup: true              # Create timestamped backup copy before any mutation
+  backup_retention_days: 7        # Delete backups older than this many days
+
+  # Backfill controls
+  backfill:
+    allow_portal_refetch: false   # Phase C only: allow network re-fetch for unresolved rows
+    portals_allowed_for_refetch:  # Limit refetch to tested portals
+      - "careersfuture"
+    max_rows_per_run: 50          # Cap backfill/refetch rows per execution to limit blast radius
+    unresolved_reason_required: true  # Every UNRESOLVED row must carry an explicit reason string
+
+  # Report output
+  report_path: "output/logs/completeness_report_{date}.json"
+  recovery_report_path: "output/logs/recovery_report_{date}.json"
+  issue_workbook_path: ""         # Optional: "output/logs/unresolved_{date}.xlsx" — blank to skip

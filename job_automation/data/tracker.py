@@ -21,6 +21,9 @@ COLUMNS = [
     "docx_path", "docx_validation_error", "processed_at",
     "employment_type_raw", "employment_type_normalized",
     "employment_filter_status", "employment_filter_reason",
+    # Salary fields — added for schema parity with trawl output (data_checker Phase D)
+    "salary_raw", "salary_min", "salary_max", "salary_currency",
+    "salary_period", "salary_status",
 ]
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")

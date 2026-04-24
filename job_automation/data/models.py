@@ -64,6 +64,13 @@ class JobListing(BaseModel):
     docx_path: Optional[str] = None
     docx_validation_error: Optional[str] = None
     processed_at: Optional[datetime] = None
+    # Salary fields — schema parity with trawl output (data_checker Phase D)
+    salary_raw: Optional[str] = None
+    salary_min: Optional[float] = None
+    salary_max: Optional[float] = None
+    salary_currency: Optional[str] = None
+    salary_period: Optional[str] = None    # "monthly", "annual", "unknown"
+    salary_status: Optional[str] = None   # "OK", "MISSING", "AMBIGUOUS", "ERROR"
 
     # Column order for Excel — must stay in sync with ExcelTracker.COLUMNS
     EXCEL_COLUMNS: list[str] = [
@@ -75,4 +82,6 @@ class JobListing(BaseModel):
         "docx_path", "docx_validation_error", "processed_at",
         "employment_type_raw", "employment_type_normalized",
         "employment_filter_status", "employment_filter_reason",
+        "salary_raw", "salary_min", "salary_max", "salary_currency",
+        "salary_period", "salary_status",
     ]
