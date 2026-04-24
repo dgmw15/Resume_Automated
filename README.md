@@ -388,6 +388,7 @@ All commands assume you are inside `job_automation/` with the venv active.
 |---|---|---|
 | Full system | `python main.py` | Runs all three phases in a loop, auto-restarts on crash |
 | Scrape only | `python trawl.py` | Saves listings to `trawl_results.xlsx` |
+| Data checker | `python check_data.py` | Audit trawl workbook for missing/inconsistent fields |
 | Skills filter | `python skills_filter_pipeline.py` | Adds skills/continue columns to trawl results |
 | AI pipeline | `python prompt_pipeline.py` | Runs Claude on rows where `continue = 1` |
 | Review UI | `streamlit run web_ui/app.py` | Opens the Streamlit review interface |
@@ -399,6 +400,72 @@ All commands assume you are inside `job_automation/` with the venv active.
 run.bat      →  activates venv + runs main.py
 trawl.bat    →  activates venv + runs trawl.py
 ```
+
+---
+
+## Data completeness checker
+
+The checker audits `trawl_results.xlsx` for missing or inconsistent salary fields and can optionally backfill them deterministically — no AI calls involved.
+
+### Toggle options (in `config.yaml`)
+
+```yaml
+salary:
+  capture_on_listing: true           # Extract salary from listing cards
+  capture_on_detail_fallback: true   # Re-try on detail page if listing has no salary
+  enable_period_inference: true      # Infer monthly/annual from raw salary text
+
+employment_filter:
+  enabled: true
+  exclude_internship: true           # Filter out intern/trainee/student roles
+  exclude_contract: false            # Filter out contract/fixed-term/temp roles
+  unknown_policy: "allow"            # "allow" or "deny" for unclassified role types
+
+data_checker:
+  enabled: false       # Set true to run on startup or via check_data.py
+  mode: "audit_only"   # "audit_only" (report only) | "recover" (write backfill)
+  dry_run: true        # Must be explicitly set to false before any writes happen
+```
+
+### Expected tracker columns
+
+After a scrape run, `Database.xlsx` will contain these columns (among others):
+
+| Column | Description |
+|---|---|
+| `employment_type_normalized` | `internship`, `contract`, `permanent`, `unknown` |
+| `employment_filter_status` | `PASSED`, `FILTERED`, `SKIPPED` |
+| `employment_filter_reason` | Why the row was filtered or passed |
+| `salary_raw` | Raw salary text from portal DOM |
+| `salary_min` / `salary_max` | Parsed numeric amounts |
+| `salary_currency` | `SGD` (or inferred) |
+| `salary_period` | `monthly`, `annual`, `unknown` |
+| `salary_status` | `OK`, `MISSING`, `AMBIGUOUS`, `ERROR` |
+
+### Quick smoke-test sequence
+
+```bash
+cd job_automation
+
+# Step 1 — scrape a page to populate trawl_results.xlsx
+python trawl.py --pages 1 --portal careersfuture
+
+# Step 2 — audit for missing salary fields (no writes)
+python check_data.py --enable
+
+# Step 3 — attempt local deterministic backfill (still dry-run, shows what would change)
+python check_data.py --enable --mode recover
+
+# Step 4 — write the backfill if you're happy with the dry-run output
+python check_data.py --enable --mode recover --no-dry-run
+
+# Step 5 — confirm the second run shows all rows as COMPLETE
+python check_data.py --enable
+```
+
+Reports are written to `output/logs/`:
+- `completeness_report_YYYYMMDD_HHMMSS.json` — field-level missing percentages, portal breakdown
+- `recovery_report_YYYYMMDD_HHMMSS.json` — rows fixed, rows unresolved by reason
 
 ---
 
@@ -414,7 +481,10 @@ Test coverage includes:
 - `test_pipeline_selector.py` — analyst/engineer track selection
 - `test_provider_router.py` — fallback and budget guard behaviour
 - `test_batch_processor.py` — SLA batch sizing and retry logic
+- `test_salary_parser.py` — salary parsing, currency detection, period inference
+- `test_employment_filter.py` — internship/contract filter toggles and unknown policy
+- `test_data_checker.py` — completeness audit, local recovery, idempotency, backup
 - `test_skills_signal_extractor.py` — regex skill pattern extraction
 - `test_trawl_login_visibility.py` — Playwright browser launch check
-- `test_docx_renderer.py` — DOCX output formatting
+- `test_docx_renderer.py` — DOCX output formatting, line classification, security guards
 - `test_prompt_pipeline.py` / `test_skills_filter_pipeline.py` — end-to-end script tests
