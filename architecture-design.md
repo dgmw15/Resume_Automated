@@ -2,7 +2,7 @@
 
 ## 1. Goals of This Update
 
-This architecture revision introduces seven capabilities:
+This architecture revision introduces eight capabilities:
 
 1. Salary extraction with explicit selector-driven parsing for CareersFuture.
 2. Toggleable employment-type filtering for internship and contract roles.
@@ -11,6 +11,7 @@ This architecture revision introduces seven capabilities:
 5. AI provider abstraction for OpenRouter and Claude with budget controls.
 6. Two prompt layers for role-specific curation (Data Analyst and Data Engineer).
 7. Downstream output generation in DOCX format.
+8. Initial data completeness audit with optional deterministic backfill.
 
 ## 2. Diagram-First Architecture Plan
 
@@ -131,6 +132,31 @@ stateDiagram-v2
   AI_IN_PROGRESS --> FAILED
 ```
 
+### 2.5 Data Completeness Decision Flow
+
+```mermaid
+flowchart TD
+  START[Row persisted after scrape] --> CHECK[Run completeness checks]
+  CHECK --> COMPLETE{All required fields valid?}
+  COMPLETE -->|yes| PASS[Mark COMPLETE and continue]
+  COMPLETE -->|no| MODE{Mode = audit_only?}
+  MODE -->|yes| FLAG[Mark UNRESOLVED with reasons]
+  MODE -->|no| LOCAL[Attempt local deterministic backfill]
+  LOCAL --> OK1{Recovered?}
+  OK1 -->|yes| R1[Mark RECOVERED_LOCAL]
+  OK1 -->|no| REFETCH{Refetch allowed?}
+  REFETCH -->|no| R2[Mark UNRESOLVED]
+  REFETCH -->|yes| FETCH[Attempt portal refetch]
+  FETCH --> OK2{Recovered?}
+  OK2 -->|yes| R3[Mark RECOVERED_REFETCH]
+  OK2 -->|no| R2
+  PASS --> NEXT[Proceed to employment filter/validation]
+  FLAG --> NEXT
+  R1 --> NEXT
+  R3 --> NEXT
+  R2 --> NEXT
+```
+
 ## 3. High-Level Target Architecture
 
 ```mermaid
@@ -187,13 +213,14 @@ graph TD
 
 1. Scrape listing and description using existing adapters.
 2. Persist raw row to Excel with initial state `SCRAPED`.
-3. Run employment-type filter stage (if enabled).
-4. Run JD Validator gate using role profile derived per row.
-5. If failed, mark row `VALIDATION_FAILED_NON_TECH` and skip AI.
-6. If passed, enqueue row into batch queue for role-specific prompt processing.
-7. Execute two-prompt pipeline for selected role stream.
-8. Save tailored text in tracker and render DOCX artifact.
-9. Mark row `DOCX_READY` only after post-write validation succeeds.
+3. Run data completeness checker (`audit_only` or `recover` mode).
+4. Run employment-type filter stage (if enabled).
+5. Run JD Validator gate using role profile derived per row.
+6. If failed, mark row `VALIDATION_FAILED_NON_TECH` and skip AI.
+7. If passed, enqueue row into batch queue for role-specific prompt processing.
+8. Execute two-prompt pipeline for selected role stream.
+9. Save tailored text in tracker and render DOCX artifact.
+10. Mark row `DOCX_READY` only after post-write validation succeeds.
 
 ### 4.2 Tracker State Model (Extended)
 
@@ -330,6 +357,139 @@ Add `job_automation/output/docx_renderer.py` using `python-docx`:
 - Persist generated path in tracker for apply step.
 - Retain failed temp files only inside retention window, then clean by scheduled cleanup call.
 
+### 5.8 Data Completeness Checker (New)
+
+Add `job_automation/core/data_checker.py`.
+
+#### 5.8.1 Field Data Contract
+
+Every field in scope is classified into one of three categories that drive recovery behaviour.
+
+**Trawl dataset fields** (`trawl_results.xlsx`):
+
+| Field | Classification | Missing-value rule |
+|---|---|---|
+| `id` | critical | null or empty → row is invalid, skip |
+| `portal` | critical | null or empty → unresolvable |
+| `role` | critical | null or empty → unresolvable |
+| `company` | recoverable | can be backfilled from detail page |
+| `url` | critical | null or empty → cannot refetch |
+| `raw_description` | recoverable | can be re-fetched via URL |
+| `salary_raw` | recoverable | can be re-fetched via URL |
+| `salary_min` | derived | recompute from `salary_raw` via parser |
+| `salary_max` | derived | recompute from `salary_raw` via parser |
+| `salary_currency` | derived | recompute from `salary_raw` or default |
+| `salary_period` | derived | infer from `salary_raw` |
+| `salary_status` | derived | recompute any time salary fields change |
+
+**Tracker dataset fields** (`Database.xlsx`) — Phase D only, after salary schema parity:
+
+| Field | Classification | Missing-value rule |
+|---|---|---|
+| `id` | critical | null → row is invalid |
+| `portal_name` | critical | null → unresolvable |
+| `role` | critical | null → unresolvable |
+| `company` | recoverable | backfill from trawl cross-reference by URL |
+| `url` | critical | null → cannot refetch |
+| `status` | critical | null → treat as SCRAPED |
+| `raw_description` | recoverable | re-fetch via URL |
+| `employment_type_normalized` | derived | recompute from `employment_type_raw` |
+| `employment_filter_status` | derived | rerun filter logic |
+| `salary_raw` | recoverable | re-fetch via URL |
+| `salary_min` … `salary_status` | derived | recompute from `salary_raw` |
+| AI metadata (`pipeline_track`, `ai_provider_used`, `cost_*`) | critical | null OK if status < BATCH_QUEUED |
+
+#### 5.8.2 Missing-Value Rule Taxonomy
+
+Three categories of "missing" are checked independently:
+
+1. **Truly missing** — the cell is `null`, empty string, or whitespace only.
+2. **Semantically missing** — the cell has a value, but the value signals absence:
+   - `salary_status` is `"MISSING"`, `"AMBIGUOUS"`, or `"ERROR"`
+   - `employment_filter_status` is `"SKIPPED"` when filtering was disabled but is now enabled
+3. **Inconsistent** — values contradict each other:
+   - `salary_min > salary_max`
+   - `salary_currency` is null while `salary_min` is non-null
+   - `salary_status = "OK"` but `salary_min` and `salary_max` are both null
+
+#### 5.8.3 Recovery Outcome States
+
+Every row evaluated by the checker is assigned exactly one outcome state:
+
+| State | Meaning |
+|---|---|
+| `COMPLETE` | All required fields valid; no action taken |
+| `RECOVERED_LOCAL` | Gap filled by local deterministic logic (parser rerun, field copy) |
+| `RECOVERED_REFETCH` | Gap filled by re-fetching the source URL |
+| `UNRESOLVED` | Gap detected but could not be filled; reason recorded |
+| `SKIPPED_NO_URL` | Row has no URL and cannot be refetched; recorded as unresolvable |
+| `ERROR_FETCH` | Refetch was attempted but the network/selector call failed |
+
+`UNRESOLVED`, `SKIPPED_NO_URL`, and `ERROR_FETCH` are all non-blocking — the checker logs them and continues.
+
+#### 5.8.4 Recovery Waterfall
+
+```
+1. Classify each field gap (truly missing / semantically missing / inconsistent)
+2. Local deterministic recovery first:
+   - if salary_raw is present → reparse using salary_parser.parse_salary_range()
+   - if salary_min only → set salary_max = salary_min
+   - if salary_max only → set salary_min = salary_max
+3. Source refetch second (only when allow_portal_refetch=true):
+   - skip rows where url is null → mark SKIPPED_NO_URL
+   - attempt portal selector extraction → on failure mark ERROR_FETCH
+   - on success → update fields and mark RECOVERED_REFETCH
+4. Tag every remaining gap as UNRESOLVED with explicit reason string
+```
+
+#### 5.8.5 Safety and Idempotency Rules
+
+- **Default to dry-run** on first execution (`dry_run: true` in config). No writes until explicitly enabled.
+- **Timestamped backup** created before any mutation (`write_backup: true`).
+- **Only changed rows are written** — unchanged rows are read-only even in `recover` mode.
+- **Idempotent reruns** — already-correct rows (`COMPLETE`) are never modified; `UNRESOLVED` rows are retried only when `unresolved_reason_required: true` policy allows (i.e., they have a recorded reason).
+- **Row-level errors do not abort the run** — failures are logged and counted; checker continues to the next row.
+
+#### 5.8.6 Output Artifacts
+
+**Completeness report** (`completeness_report_{date}.json`):
+- Total row count
+- Row counts by classification state (`COMPLETE`, `UNRESOLVED`, etc.)
+- Field-level missing percentage across all rows
+- Portal-level breakdown of missing counts
+- List of inconsistency instances with row ID and description
+
+**Recovery report** (`recovery_report_{date}.json`):
+- Rows attempted (any non-COMPLETE row)
+- Rows fixed (`RECOVERED_LOCAL` + `RECOVERED_REFETCH`)
+- Rows unresolved, grouped by reason code
+- Rows skipped (`SKIPPED_NO_URL`) and errored (`ERROR_FETCH`)
+
+**Optional issue workbook** (`unresolved_{date}.xlsx`):
+- Filtered view of rows still requiring manual review
+- Generated only when `issue_workbook_path` is set in config
+
+#### 5.8.7 Rollout Phases
+
+| Phase | Scope | Writes | Network |
+|---|---|---|---|
+| **A** | Trawl workbook, audit only | No | No |
+| **B** | Trawl workbook, local recovery | Yes (salary derived fields) | No |
+| **C** | Trawl workbook, portal refetch | Yes | Yes (capped per run) |
+| **D** | Extend to tracker workbook | Yes | After schema parity confirmed |
+
+**Phase D prerequisite:** Tracker schema must include salary fields (`salary_raw` through `salary_status`). These columns have been added to `tracker.py` and `models.py` in anticipation — however the checker should not target `Database.xlsx` until the fields are populated with real data and a migration run is confirmed complete.
+
+#### 5.8.8 Key Design Decision: Trawl-First vs Tracker-Immediate
+
+**Decision: Start with trawl workbook only (Phase A/B/C), extend to tracker in Phase D.**
+
+Rationale:
+- `trawl_results.xlsx` already has all six salary columns populated by the scraper.
+- `Database.xlsx` tracker schema now includes the salary column definitions, but the columns will be empty for all existing rows until a migration or re-scrape happens.
+- Running the checker against an empty column set produces false UNRESOLVED counts with no recovery path.
+- Targeting trawl first gives real signal immediately; tracker targeting is safe once rows actually contain salary data.
+
 ## 6. Configuration Model Changes
 
 Extend `job_automation/config.yaml` with:
@@ -344,6 +504,7 @@ Extend `job_automation/config.yaml` with:
 - `employment_filter`: enabled flag and internship/contract toggles
 - `validation`: keyword dictionaries, thresholds, deny patterns
 - `output`: docx template path and output directory
+- `data_checker`: enabled flag, mode, target workbooks, backfill/refetch limits, and report output path
 
 ## 7. Data and Filesystem Impacts
 
@@ -379,8 +540,14 @@ job_automation/
 │   ├── docs/
 │   │   └── <job_id>.docx
 │   └── logs/
-│       └── ai_costs_YYYYMMDD.csv
+│       ├── ai_costs_YYYYMMDD.csv
+│       ├── completeness_report_YYYYMMDD.json    # data_checker audit report
+│       ├── recovery_report_YYYYMMDD.json        # data_checker recovery summary
+│       └── unresolved_YYYYMMDD.xlsx             # optional issue workbook
 ```
+
+Backup copies of mutated workbooks are written alongside the originals with a timestamp suffix:
+`trawl_results_backup_YYYYMMDD_HHMMSS.xlsx`
 
 ## 8. Reliability and Guardrails
 
@@ -392,6 +559,10 @@ job_automation/
 6. Selector-specific salary extraction reduces parsing ambiguity and improves testability.
 7. Tracker metadata includes reservation lifecycle fields for budget audits and replay diagnosis.
 8. Portability requirement: budget-ledger path must run on Windows and POSIX with equivalent semantics.
+9. Data quality gate requirement: completeness checks run before downstream filters/validation so stale rows are not silently propagated.
+10. Data checker defaults to dry-run and audit-only — no mutations happen unless explicitly enabled via config.
+11. Checker is idempotent: re-running on already-correct rows produces the same COMPLETE outcome and no writes.
+12. Schema evolution is forward-compatible: `_migrate_columns()` in `ExcelTracker` adds new columns to existing workbooks without touching existing data. Checkers and adapters must handle null values in newly added columns gracefully.
 
 ## 9. Security and Compliance
 

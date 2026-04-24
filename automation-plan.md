@@ -11,6 +11,7 @@ Implement the five approved changes in one coherent rollout:
 5. DOCX downstream output as final artifact.
 6. Salary capture from scraped listings with normalized fields for downstream filtering and ranking.
 7. Optional employment-type filtering to exclude internships and/or contract roles.
+8. Initial data completeness checker with optional deterministic backfill for missing fields.
 
 ## 2. Delivery Strategy
 
@@ -125,6 +126,18 @@ Exit criteria:
 - Critical-path tests run in the project venv.
 - No portability regressions in budget-ledger startup path.
 
+### Phase 10: Data Completeness Check + Backfill
+
+- Add a deterministic checker that audits missing/inconsistent fields before downstream processing.
+- Support `audit_only` mode (report only) and `recover` mode (write back recoverable data).
+- Use local parsing backfill first, then optional portal refetch for unresolved salary gaps.
+
+Exit criteria:
+
+- Checker reports field-level and row-level completeness clearly.
+- Recover mode fills deterministic missing data without changing already-valid rows.
+- Unresolved rows are tagged with explicit reason codes.
+
 ## 3. Detailed Work Breakdown
 
 ## 3.1 Code-Level Changes
@@ -146,6 +159,8 @@ Exit criteria:
 - `job_automation/ai/jd_validator.py`: add employment-type filter stage before AI queue entry.
 - `job_automation/tests/test_provider_router.py`: keep tests aligned with ledger-based provider routing APIs.
 - `job_automation/tests/test_docx_renderer.py`: keep tests aligned with current DOCX renderer APIs.
+- `job_automation/core/data_checker.py`: workbook-level completeness audit and optional backfill orchestration.
+- `job_automation/tests/test_data_checker.py`: deterministic completeness and recovery behavior tests.
 
 ## 3.2 Salary Data Contract
 
@@ -240,6 +255,17 @@ Validation and pipeline suggested keys:
 - `validation.role_source: "row_role"`
 - `ai.pipeline_mode: "role_hint"`
 
+Data checker suggested keys:
+
+- `data_checker.enabled: true`
+- `data_checker.run_stage: "pre_pipeline"`
+- `data_checker.mode: "audit_only"`  # `audit_only` or `recover`
+- `data_checker.targets: ["trawl_results.xlsx", "trawl_results_enriched.xlsx"]`
+- `data_checker.backfill.allow_portal_refetch: true`
+- `data_checker.backfill.max_rows_per_run: 100`
+- `data_checker.write_backup: true`
+- `data_checker.report_path: "output/logs/data_completeness_YYYYMMDD.json"`
+
 ## 3.5 Excel Tracker Evolution
 
 Add columns:
@@ -269,6 +295,32 @@ Add columns:
 Backward compatibility plan:
 
 - On startup, detect missing columns and append them automatically.
+
+## 3.6 Data Completeness Checker Contract
+
+Checker target fields for trawl workbooks:
+
+- `salary_raw`
+- `salary_min`
+- `salary_max`
+- `salary_currency`
+- `salary_period`
+- `salary_status`
+
+Row classification states:
+
+- `COMPLETE`: required fields present and internally consistent.
+- `MISSING`: one or more required fields are empty.
+- `INCONSISTENT`: fields conflict (for example, `salary_min > salary_max`).
+- `RECOVERED_LOCAL`: filled by deterministic parser from existing raw text.
+- `RECOVERED_REFETCH`: filled by re-fetching source page selectors.
+- `UNRESOLVED`: could not recover; explicit reason attached.
+
+Recovery order:
+
+1. Recompute from local `salary_raw` using parser.
+2. If still unresolved and allowed, refetch salary from source URL.
+3. Persist result with recovery status and reason.
 
 ## 4. Automation Timing Model
 
@@ -314,6 +366,7 @@ This keeps processing slow and cost-aware while still meeting the 24h objective.
 11. Test drift risk: prevent stale tests from referencing deleted APIs.
 12. Validator role mismatch risk: choose keyword profile from each row role/title, not one global default.
 13. Reservation audit gaps: persist reservation id, expiry, reserved cost, and actual cost in tracker rows.
+14. Silent data quality drift risk: enforce pre-pipeline completeness checks and explicit unresolved tagging.
 
 ## 6. Test Plan
 
@@ -333,6 +386,8 @@ Minimum automated tests to add:
 12. Test-contract checks for provider-router and DOCX renderer test modules.
 13. Validator role-source tests proving per-row role controls keyword-pack selection.
 14. Reservation metadata tests proving tracker captures reserve/commit lifecycle fields.
+15. Data-checker tests for missing, inconsistent, recovered, and unresolved row classifications.
+16. Idempotency tests proving repeated checker runs do not mutate already-correct rows.
 
 Manual checks:
 
@@ -346,6 +401,8 @@ Manual checks:
 8. Verify CareersFuture rows with salary range HTML populate min/max correctly from first and second `span.dib` elements.
 9. Verify budget-ledger path starts in Windows without lock/import crash.
 10. Verify DOCX temp artifacts are cleaned after retention window.
+11. Verify checker audit report is produced before downstream processing.
+12. Verify recover mode updates only recoverable rows and leaves complete rows untouched.
 
 ## 7. Acceptance Criteria by Line Item
 
@@ -358,6 +415,7 @@ Manual checks:
 7. DOCX output: every tailored row has an accessible `.docx` artifact path.
 8. Platform portability: budget ledger and batch flow work on Windows and POSIX.
 9. Test alignment: critical test suites target current production interfaces.
+10. Data quality gate: missing/inconsistent data is detected before pipeline stages and recoverable gaps are backfilled deterministically.
 
 ## 8. Recommended Execution Order (Practical)
 
@@ -369,4 +427,5 @@ Manual checks:
 6. Implement dual-prompt pipeline.
 7. Implement DOCX rendering and review handoff.
 8. Align and harden tests to current APIs and platform constraints.
-9. Run full integration and tune keyword thresholds on real SG samples.
+9. Implement and validate data completeness checker (audit mode, then recover mode).
+10. Run full integration and tune keyword thresholds on real SG samples.

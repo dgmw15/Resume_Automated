@@ -11,6 +11,7 @@ Goal of this pack:
 5. Generate DOCX outputs for downstream review and submission.
 6. Add salary extraction with explicit CareersFuture selector parsing.
 7. Add toggleable filtering for internships and contract roles.
+8. Add a data completeness checker that audits and optionally backfills missing recoverable fields.
 
 ---
 
@@ -235,6 +236,158 @@ Deliverable:
 
 ---
 
+## New Prompt Series: Data Completeness Checker + Backfill
+
+Use this after salary and employment changes are in place so historical rows can be repaired safely.
+
+### Prompt C0: Checker Scope and Safety Rules
+
+```text
+Task: Define a deterministic data checker contract before implementing code.
+
+Scope decision:
+Phase A/B/C target trawl_results.xlsx ONLY.
+Phase D extends to Database.xlsx (tracker) only AFTER tracker salary columns
+(salary_raw through salary_status) contain real data from a confirmed migration run.
+Do not target Database.xlsx in the initial implementation.
+
+Field data contract for trawl_results.xlsx:
+- critical (must be non-empty, unresolvable if missing):
+    id, portal, role, url
+- recoverable (can be backfilled from existing data or portal refetch):
+    company, raw_description, salary_raw
+- derived (recompute from other fields, no network needed):
+    salary_min, salary_max, salary_currency, salary_period, salary_status
+
+Missing-value categories (checked independently):
+1. truly missing — null or empty string
+2. semantically missing — salary_status is MISSING, AMBIGUOUS, or ERROR
+3. inconsistent — salary_min > salary_max, or currency null while salary_min non-null,
+   or salary_status=OK while both salary_min and salary_max are null
+
+Recovery outcome states (exactly one assigned per row):
+- COMPLETE          — all fields valid, no action
+- RECOVERED_LOCAL   — gap filled by local parse/field copy
+- RECOVERED_REFETCH — gap filled by re-fetching source URL
+- UNRESOLVED        — gap detected, cannot fill, reason recorded
+- SKIPPED_NO_URL    — row has no URL, refetch impossible
+- ERROR_FETCH       — refetch attempted but network/selector call failed
+
+Safety rules (non-negotiable):
+- dry_run=true by default — no writes unless explicitly set to false
+- always create timestamped backup copy before any mutation
+- only write rows that changed; unchanged rows are read-only even in recover mode
+- idempotent reruns: already-COMPLETE rows are never touched
+- UNRESOLVED rows are retried only when policy allows (unresolved_reason_required=true)
+- row-level failures do not abort the run; log and continue
+
+Acceptance criteria:
+1. Audit mode identifies all three categories of missing data with row-level evidence.
+2. Recover mode fills derived salary gaps without network calls.
+3. Re-run is idempotent — already-correct rows emit COMPLETE with no writes.
+4. Every UNRESOLVED row carries a non-empty reason string.
+5. Recovery report is produced on every run regardless of mode.
+
+Deliverable:
+- Confirmed contract summary and acceptance criteria — no code yet.
+```
+
+### Prompt C1: Add Checker Config Block
+
+```text
+Task: Extend config for checker execution and backfill controls.
+
+Files to modify:
+1. job_automation/config.yaml
+
+Requirements:
+1. Add data_checker section with:
+   - enabled
+   - run_stage (pre_pipeline)
+   - mode (audit_only|recover)
+   - targets (workbook file list)
+   - write_backup
+2. Add backfill controls:
+   - allow_portal_refetch
+   - max_rows_per_run
+   - unresolved_reason_required
+3. Add report output path setting.
+
+Deliverable:
+- Updated config schema with safe defaults.
+```
+
+### Prompt C2: Implement Audit and Deterministic Local Recovery
+
+```text
+Task: Build checker logic for missing/inconsistent detection and local salary backfill.
+
+Files to add:
+1. job_automation/core/data_checker.py
+
+Files to modify:
+1. job_automation/core/salary_parser.py (only if helper reuse requires minor extension)
+
+Requirements:
+1. Detect missing and inconsistent salary rows.
+2. Attempt local deterministic recovery from salary_raw.
+3. Do not use AI calls.
+4. Emit structured report with counts by classification state.
+
+Deliverable:
+- Runnable checker in audit_only and recover modes.
+```
+
+### Prompt C3: Add Optional Refetch Recovery Path
+
+```text
+Task: Add controlled source refetch for unresolved rows.
+
+Files to modify:
+1. job_automation/core/data_checker.py
+2. job_automation/adapters/careersfuture.py (if helper selectors are shared)
+
+Requirements:
+1. Refetch only when allow_portal_refetch=true.
+2. Respect max_rows_per_run.
+3. Tag outcomes as RECOVERED_REFETCH or UNRESOLVED with reason.
+4. Continue processing even when individual refetch attempts fail.
+
+Deliverable:
+- Controlled backfill workflow with explicit row-level outcomes.
+```
+
+### Prompt C4: Tests and Runbook for Checker
+
+```text
+Task: Add tests and operational docs for checker behavior.
+
+Files to add:
+1. job_automation/tests/test_data_checker.py
+
+Files to modify:
+1. job_automation/README.md (or docs/developer_guide.md)
+
+Requirements:
+1. Tests for COMPLETE, MISSING, INCONSISTENT, RECOVERED_LOCAL, UNRESOLVED.
+2. Idempotency test for repeated checker runs.
+3. Refetch path test with capped rows.
+4. Document audit_only first-run command and recover command.
+
+Deliverable:
+- Test coverage and runbook for safe adoption.
+```
+
+### Recommended Order For Checker Scope
+
+1. Prompt C0
+2. Prompt C1
+3. Prompt C2
+4. Prompt C3
+5. Prompt C4
+
+---
+
 ## Critical Risk Planning Layer
 
 ### Risk: DOCX Render Failure is Silent
@@ -387,6 +540,15 @@ Requirements:
    - docx_template_path (optional)
    - docx_temp_retention_hours
    - docx_validation_required_sections
+7. Under data_checker, include:
+   - enabled
+   - run_stage
+   - mode
+   - targets
+   - write_backup
+   - backfill.allow_portal_refetch
+   - backfill.max_rows_per_run
+   - report_path
 
 Deliverable:
 - Updated config.yaml with sane defaults and comments.
@@ -670,6 +832,7 @@ Files to add:
 3. job_automation/tests/test_pipeline_selector.py
 4. job_automation/tests/test_batch_processor.py
 5. job_automation/tests/test_docx_renderer.py
+6. job_automation/tests/test_data_checker.py
 
 Requirements:
 1. Use pytest style.
@@ -684,6 +847,7 @@ Requirements:
 9. Add idempotency test for duplicated retry execution.
 10. Add test-suite contract checks ensuring tests reference only existing public symbols.
 11. Add Windows runtime test for budget-ledger import/startup path.
+12. Add data-checker tests for classification states and recover-mode idempotency.
 
 Deliverable:
 - Tests pass locally and validate critical behavior.
@@ -860,16 +1024,21 @@ Run prompts in this order:
 
 1. Prompt 0
 2. Prompt 1
-3. Prompt 2
-4. Prompt 3
-5. Prompt 4
-6. Prompt 5
-7. Prompt 6
-8. Prompt 7
-9. Prompt 8
-10. Prompt 9
-11. Prompt 11 (critical)
-12. Prompt 12 (critical)
-13. Prompt 13 (critical)
-14. Prompt 14 (critical)
-15. Prompt 10 (optional)
+3. Prompt C0
+4. Prompt C1
+5. Prompt C2
+6. Prompt C3
+7. Prompt C4
+8. Prompt 2
+9. Prompt 3
+10. Prompt 4
+11. Prompt 5
+12. Prompt 6
+13. Prompt 7
+14. Prompt 8
+15. Prompt 9
+16. Prompt 11 (critical)
+17. Prompt 12 (critical)
+18. Prompt 13 (critical)
+19. Prompt 14 (critical)
+20. Prompt 10 (optional)
