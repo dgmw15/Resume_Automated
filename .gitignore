@@ -40,3 +40,6 @@ _bmad-output/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+job_automation/output/logs/
+output/logs/
