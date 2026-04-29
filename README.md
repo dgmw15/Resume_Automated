@@ -469,6 +469,39 @@ Reports are written to `output/logs/`:
 
 ---
 
+## Dataframe engine
+
+Excel role loading uses a config-driven engine abstraction (`core/dataframe_engine.py`).
+Both **pandas** and **Polars** backends are supported and produce identical output.
+
+```yaml
+# config.yaml
+dataframe:
+  engine: "polars"                   # "pandas" | "polars"
+  allow_fallback_to_pandas: true     # Polars failure → pandas retry
+```
+
+**Switching engines:**
+```bash
+# Temporary override (no file change needed)
+python -c "
+import yaml, pathlib
+cfg = yaml.safe_load(pathlib.Path('config.yaml').read_text())
+cfg['dataframe']['engine'] = 'pandas'
+pathlib.Path('config.yaml').write_text(yaml.dump(cfg))
+"
+```
+
+**Rollback command:**
+
+Set `dataframe.engine: "pandas"` in `config.yaml`.  Pandas remains installed and the
+fallback path is exercised automatically whenever `allow_fallback_to_pandas: true`.
+
+**Parity guarantee:**  Run `pytest tests/test_dataframe_engine.py -v` — the `TestParityGate`
+class asserts that pandas and Polars produce byte-identical role lists on shared fixtures.
+
+---
+
 ## Tests
 
 ```bash
@@ -484,6 +517,7 @@ Test coverage includes:
 - `test_salary_parser.py` — salary parsing, currency detection, period inference
 - `test_employment_filter.py` — internship/contract filter toggles and unknown policy
 - `test_data_checker.py` — completeness audit, local recovery, idempotency, backup
+- `test_dataframe_engine.py` — pandas/polars parity gate, fallback logic, from_config factory
 - `test_skills_signal_extractor.py` — regex skill pattern extraction
 - `test_trawl_login_visibility.py` — Playwright browser launch check
 - `test_docx_renderer.py` — DOCX output formatting, line classification, security guards
