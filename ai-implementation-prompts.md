@@ -12,6 +12,199 @@ Goal of this pack:
 6. Add salary extraction with explicit CareersFuture selector parsing.
 7. Add toggleable filtering for internships and contract roles.
 8. Add a data completeness checker that audits and optionally backfills missing recoverable fields.
+9. Migrate dataframe operations from pandas to Polars with parity checks and rollback safety.
+
+---
+
+## Completion Audit (2026-04-25)
+
+Status legend:
+- DONE = implemented and verified by code/test evidence in this repo.
+- NOT DONE = implemented partially or currently failing validation/tests.
+- N/A = process guardrail prompt, not a code-deliverable prompt.
+
+Pandas -> Polars series:
+- Prompt P0: DONE
+- Prompt P1: DONE
+- Prompt P2: DONE
+- Prompt P3: DONE
+- Prompt P4: DONE
+- Prompt P5: DONE
+
+Salary + Employment series:
+- Prompt S0: DONE
+- Prompt S1: DONE
+- Prompt S2: DONE
+- Prompt S3: DONE
+- Prompt S4: DONE
+- Prompt S5: DONE
+- Prompt S6: DONE
+- Prompt S7: DONE
+
+Data Completeness Checker series:
+- Prompt C0: DONE
+- Prompt C1: DONE
+- Prompt C2: DONE
+- Prompt C3: DONE
+- Prompt C4: DONE
+
+Main Prompt 0-14 series:
+- Prompt 0: N/A
+- Prompt 1: DONE
+- Prompt 2: DONE
+- Prompt 3: DONE
+- Prompt 4: NOT DONE
+- Prompt 5: DONE
+- Prompt 6: NOT DONE
+- Prompt 7: NOT DONE
+- Prompt 8: NOT DONE
+- Prompt 9: NOT DONE
+- Prompt 10: DONE
+- Prompt 11: NOT DONE
+- Prompt 12: NOT DONE
+- Prompt 13: NOT DONE
+- Prompt 14: NOT DONE
+
+Current blockers observed during audit:
+- Windows portability blocker: `core/budget_ledger.py` imports `fcntl` at module import-time, causing `ModuleNotFoundError` on Windows and breaking provider/batch test collection.
+- DOCX behavior blocker: `test_docx_renderer.py` currently fails multiple formatting-preservation assertions (spaces collapsed in output text).
+
+---
+
+## New Prompt Series: Pandas -> Polars Migration
+
+Use this series to plan and execute a safe dataframe engine migration with zero behavior drift in scraping and orchestration.
+
+### Prompt P0: Scope Lock and Compatibility Rules
+
+```text
+Task: Define migration scope from pandas to Polars in job_automation.
+
+Rules:
+- No broad refactor outside dataframe loading/transformation touchpoints.
+- Preserve workbook schema and tracker behavior.
+- Keep deterministic output parity as primary objective.
+- Add rollback path via config switch (pandas/polars).
+- Do not remove pandas dependency until parity and canary criteria pass.
+
+Deliverable:
+- Confirmed scope map + migration boundaries + rollback plan.
+```
+
+### Prompt P1: Inventory Current Pandas Usage
+
+```text
+Task: Produce a concrete inventory of pandas usage and classify migration risk.
+
+Files to inspect:
+1. job_automation/trawl.py
+2. job_automation/core/orchestrator.py
+3. job_automation/requirements.txt
+
+Requirements:
+1. List each pandas callsite and operation type.
+2. Mark each callsite as low/medium/high migration risk.
+3. Identify ordering/null-trimming semantics that must remain unchanged.
+4. Propose exact wrapper API needed for safe migration.
+
+Deliverable:
+- Callsite inventory table + proposed adapter contract.
+```
+
+### Prompt P2: Introduce Dataframe Engine Abstraction
+
+```text
+Task: Add a dataframe engine abstraction that supports pandas and Polars.
+
+Files to add:
+1. job_automation/core/dataframe_engine.py
+
+Files to modify:
+1. job_automation/config.yaml
+2. job_automation/trawl.py
+3. job_automation/core/orchestrator.py
+
+Requirements:
+1. Config block:
+   - dataframe.engine (pandas|polars)
+   - dataframe.allow_fallback_to_pandas (bool)
+2. Wrapper API should include role-loading helper(s) currently used by both callsites.
+3. Keep pandas as default engine initially.
+4. Add explicit logs showing selected engine.
+
+Deliverable:
+- Engine abstraction wired with no behavior change in default mode.
+```
+
+### Prompt P3: Implement Polars Path With Deterministic Semantics
+
+```text
+Task: Implement Polars-backed role loading while preserving pandas-equivalent output.
+
+Files to modify:
+1. job_automation/core/dataframe_engine.py
+2. job_automation/requirements.txt
+
+Requirements:
+1. Add Polars dependency and compatible Excel-read strategy.
+2. Ensure trimmed role strings, null filtering, and list ordering match pandas behavior.
+3. Add defensive fallback when Polars read fails and fallback is enabled.
+4. Keep error messages actionable and include workbook/sheet/column context.
+
+Deliverable:
+- Polars mode available behind config flag with deterministic output behavior.
+```
+
+### Prompt P4: Parity, Canary, and Cutover Gates
+
+```text
+Task: Define parity and rollout gates before making Polars the default.
+
+Files to add:
+1. job_automation/tests/test_dataframe_engine.py
+
+Files to modify:
+1. job_automation/tests/ existing relevant suites as needed
+2. job_automation/README.md (or docs/developer_guide.md)
+
+Requirements:
+1. Add tests proving pandas and Polars produce identical role lists on shared fixtures.
+2. Add fallback test (Polars failure -> pandas path) when fallback is enabled.
+3. Add smoke benchmark script/steps for runtime and memory comparison.
+4. Document canary rollout steps and rollback command/config switch.
+
+Deliverable:
+- Cutover checklist with explicit parity + performance pass criteria.
+```
+
+### Prompt P5: Dependency Cleanup and Finalization
+
+```text
+Task: Finalize migration after parity and canary success.
+
+Files to modify:
+1. job_automation/config.yaml
+2. job_automation/requirements.txt
+3. job_automation/README.md (or docs/developer_guide.md)
+
+Requirements:
+1. Set default dataframe.engine to polars.
+2. Keep fallback path policy explicit (retain or remove pandas by decision).
+3. Document final operational guidance and known limitations.
+4. Verify no unresolved TODOs in migration-related files.
+
+Deliverable:
+- Stable default Polars runtime with documented rollback and support policy.
+```
+
+### Recommended Order For Polars Migration
+
+1. Prompt P0
+2. Prompt P1
+3. Prompt P2
+4. Prompt P3
+5. Prompt P4
+6. Prompt P5
 
 ---
 
