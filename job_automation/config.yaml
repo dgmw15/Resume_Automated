@@ -191,3 +191,12 @@ data_checker:
   report_path: "output/logs/completeness_report_{date}.json"
   recovery_report_path: "output/logs/recovery_report_{date}.json"
   issue_workbook_path: ""         # Optional: "output/logs/unresolved_{date}.xlsx" — blank to skip
+
+# ---------------------------------------------------------------------------
+# Dataframe engine — controls Excel role-loading backend
+# Phase P2/P3: pandas default with Polars available behind config flag.
+# Phase P5: switch engine to "polars" once parity is confirmed.
+# ---------------------------------------------------------------------------
+dataframe:
+  engine: "polars"                   # "pandas" | "polars"
+  allow_fallback_to_pandas: true     # Polars failure → pandas retry (safe default)

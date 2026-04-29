@@ -28,11 +28,11 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
-import pandas as pd
 import yaml
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill
 from playwright.async_api import async_playwright
+from core.dataframe_engine import DataFrameEngine
 from core.login_utils import wait_with_progress
 from core.salary_parser import parse_salary_range
 
@@ -165,15 +165,10 @@ def load_roles(config: dict) -> list[str]:
     sheet  = roles_cfg.get("sheet", "Roles")
     column = roles_cfg.get("column", "Job Role")
 
-    if excel_path.exists():
-        try:
-            df = pd.read_excel(excel_path, sheet_name=sheet)
-            roles = df[column].dropna().str.strip().tolist()
-            if roles:
-                logger.info("Loaded %d roles from %s", len(roles), excel_path)
-                return roles
-        except Exception as exc:
-            logger.warning("Could not read %s: %s", excel_path, exc)
+    engine = DataFrameEngine.from_config(config)
+    roles = engine.load_roles(excel_path, sheet, column)
+    if roles:
+        return roles
 
     fallback = config.get("search", {}).get("keywords", [])
     logger.info("Using %d fallback keywords from config.yaml", len(fallback))

@@ -4,6 +4,8 @@ playwright==1.44.0
 # Data Storage
 openpyxl==3.1.5
 pandas==2.2.2
+polars>=1.0.0
+fastexcel>=0.11.0           # Required by polars for pl.read_excel() — uses arrow-based XLSX reader
 
 # AI Integration — new provider routing
 anthropic>=0.28.0

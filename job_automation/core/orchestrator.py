@@ -5,7 +5,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import yaml
 
 from adapters.base_adapter import SessionExpiredException
@@ -17,6 +16,7 @@ from ai.jd_validator import build_validator_from_config
 from ai.provider_router import ProviderRouter
 from ai.tailor import ResumeTailor
 from core.batch_processor import BatchProcessor
+from core.dataframe_engine import DataFrameEngine
 from core.rate_limiter import RateLimiter
 from core.session_manager import SessionManager
 from data.models import JobStatus
@@ -144,19 +144,18 @@ class Orchestrator:
         sheet      = roles_cfg.get("sheet", "Roles")
         column     = roles_cfg.get("column", "Job Role")
 
-        if excel_path.exists():
-            try:
-                df = pd.read_excel(excel_path, sheet_name=sheet)
-                roles = df[column].dropna().str.strip().tolist()
-                if roles:
-                    logger.info("Loaded %d job roles from %s", len(roles), excel_path)
-                    return roles
-                logger.warning("Column '%s' in %s is empty — falling back to config keywords.", column, excel_path)
-            except Exception as exc:
-                logger.warning("Could not read %s: %s — falling back to config keywords.", excel_path, exc)
-        else:
-            logger.info("%s not found — using config.yaml keywords.", excel_path)
+        engine = DataFrameEngine.from_config(self.config)
+        roles = engine.load_roles(excel_path, sheet, column)
+        if roles:
+            return roles
 
+        if not excel_path.exists():
+            logger.info("%s not found — using config.yaml keywords.", excel_path)
+        else:
+            logger.warning(
+                "Column '%s' in %s is empty or unreadable — falling back to config keywords.",
+                column, excel_path,
+            )
         return self.config.get("search", {}).get("keywords", [])
 
     # ------------------------------------------------------------------
