@@ -2,7 +2,7 @@
 
 ## 1. Goals of This Update
 
-This architecture revision introduces eight capabilities:
+This architecture revision introduces ten capabilities:
 
 1. Salary extraction with explicit selector-driven parsing for CareersFuture.
 2. Toggleable employment-type filtering for internship and contract roles.
@@ -12,6 +12,8 @@ This architecture revision introduces eight capabilities:
 6. Two prompt layers for role-specific curation (Data Analyst and Data Engineer).
 7. Downstream output generation in DOCX format.
 8. Initial data completeness audit with optional deterministic backfill.
+9. Dataframe engine migration path from pandas to Polars with parity guardrails.
+10. ATS-style resume tailoring agents that extract keywords, select tasks, and produce a resume draft.
 
 ## 2. Diagram-First Architecture Plan
 
@@ -52,6 +54,13 @@ flowchart LR
     FILES[(Output Docs)]
   end
 
+  subgraph Resume Tailoring
+    ATS[ATS Keyword Extractor]
+    TSEL[Task Selector]
+    RRW[Resume Rewriter]
+    RDOCX[Resume DOCX]
+  end
+
   CF --> ADP
   IN --> ADP
   ADP --> TR
@@ -70,6 +79,12 @@ flowchart LR
   PIPE --> DOCX
   DOCX --> FILES
   DOCX --> XLS
+  XLS --> ATS
+  ATS --> TSEL
+  TSEL --> RRW
+  RRW --> RDOCX
+  RDOCX --> FILES
+  RDOCX --> XLS
 ```
 
 ### 2.2 Salary Extraction Sequence (CareersFuture)
@@ -157,6 +172,20 @@ flowchart TD
   R2 --> NEXT
 ```
 
+### 2.6 Resume Tailoring Flow (ATS-Style)
+
+```mermaid
+flowchart TD
+  START[JD + Task List] --> KEY[Extract ATS Keywords]
+  KEY --> SCORE[Score Tasks by Keyword Coverage]
+  SCORE --> PICK[Select 3-4 Most Relevant Tasks]
+  PICK --> REWRITE[Rewrite Bullets with Keywords]
+  REWRITE --> QC{Keyword Coverage Met?}
+  QC -->|yes| SAVE[Save Resume Draft + Audit Fields]
+  QC -->|no| TUNE[Adjust Task Order or Wording]
+  TUNE --> REWRITE
+```
+
 ## 3. High-Level Target Architecture
 
 ```mermaid
@@ -164,6 +193,7 @@ graph TD
   subgraph Ingestion
     ORCH[Orchestrator]
     ADAPT[Portal Adapters]
+    DFE[Dataframe Engine\npandas/polars]
     TRACK[(Excel Tracker)]
   end
 
@@ -195,8 +225,18 @@ graph TD
     DOCX --> STORE
   end
 
+  subgraph Resume Tailoring
+    ATS[ATS Keyword Extractor]
+    TSEL[Task Selector]
+    RRW[Resume Rewriter]
+    RDOCX[Resume DOCX]
+    RDOCX --> STORE
+  end
+
   ORCH --> ADAPT
+  ORCH --> DFE
   ADAPT --> TRACK
+  DFE --> TRACK
   TRACK --> JDV
   JDV -->|PASS| BQ
   JDV -->|FAIL| TRACK
@@ -205,6 +245,11 @@ graph TD
   PIPE --> TRACK
   PIPE --> DOCX
   RETRY --> BQ
+  TRACK --> ATS
+  ATS --> TSEL
+  TSEL --> RRW
+  RRW --> RDOCX
+  RDOCX --> TRACK
 ```
 
 ## 4. Runtime Pipeline and States
@@ -220,7 +265,10 @@ graph TD
 7. If passed, enqueue row into batch queue for role-specific prompt processing.
 8. Execute two-prompt pipeline for selected role stream.
 9. Save tailored text in tracker and render DOCX artifact.
-10. Mark row `DOCX_READY` only after post-write validation succeeds.
+10. Extract ATS keywords from JD text and score task list coverage.
+11. Select 3-4 tasks and rewrite resume bullets with verified keywords.
+12. Save resume draft path and audit metadata in tracker.
+13. Mark row `DOCX_READY` only after post-write validation succeeds.
 
 ### 4.2 Tracker State Model (Extended)
 
@@ -240,6 +288,21 @@ Recommended status lifecycle:
 - `FAILED`
 
 ## 5. Component Design Changes
+
+### 5.0 Dataframe Engine Adapter (New)
+
+Add `job_automation/core/dataframe_engine.py` as a narrow compatibility layer:
+
+- Goal: isolate pandas/Polars API differences from business logic.
+- Initial scope: role workbook loading currently used by `trawl.py` and `core/orchestrator.py`.
+- Config switch: `dataframe.engine = pandas | polars`.
+- Fallback policy: if selected engine fails for supported read path, log and fallback to pandas only when explicitly allowed.
+
+Contracted wrapper operations:
+
+- `read_roles(path, sheet, column) -> list[str]`
+- `normalize_text_column(values) -> list[str]` (trim/null filtering semantics)
+- optional `engine_name()` for diagnostics and telemetry
 
 ### 5.1 JD Validator (New)
 
@@ -293,6 +356,10 @@ Decision output:
 - `employment_type_normalized`
 - `employment_filter_status`
 - `employment_filter_reason`
+- `resume_keywords`
+- `resume_selected_tasks`
+- `resume_draft_path`
+- `resume_rewrite_notes`
 
 ### 5.4 Batch Engine (New)
 
@@ -490,6 +557,48 @@ Rationale:
 - Running the checker against an empty column set produces false UNRESOLVED counts with no recovery path.
 - Targeting trawl first gives real signal immediately; tracker targeting is safe once rows actually contain salary data.
 
+### 5.9 Resume Tailoring Agents (ATS-Style)
+
+Add a deterministic, ATS-inspired resume tailoring flow that runs after tailored text is available.
+
+Core components:
+
+- **ATS Keyword Extractor:** derives role keywords and phrases from JD text and configured keyword packs.
+- **Task Selector:** scores task list items by keyword coverage and role alignment, then selects 3-4.
+- **Resume Rewriter:** rewrites the selected tasks into ATS-friendly bullets without altering factual meaning.
+- **Audit Metadata:** stores keywords, selected tasks, and rewrite notes for traceability and replay.
+
+Inputs and outputs:
+
+- Inputs: `raw_description`, `role`, and user-provided task list.
+- Outputs: `resume_keywords`, `resume_selected_tasks`, `resume_draft_path`, `resume_rewrite_notes`.
+
+Determinism rules:
+
+- Use stable keyword ranking and deterministic tie-breaking.
+- Reject rewrites that drop required keywords below minimum coverage threshold.
+
+### 5.10 Pandas-to-Polars Migration Design
+
+Design objectives:
+
+- Improve memory profile and throughput for tabular preprocessing paths.
+- Preserve existing workbook and tracker behavior without schema changes.
+- Limit migration blast radius by using adapter boundaries instead of broad rewrites.
+
+Incremental rollout model:
+
+1. Introduce adapter with pandas implementation as default.
+2. Add Polars implementation and parity tests on same fixtures.
+3. Run canary in `polars` mode with rollback guard.
+4. Promote Polars after parity and reliability thresholds are met.
+
+Compatibility notes:
+
+- Differences in dtype inference and null handling must be normalized in adapter layer.
+- Row ordering and string cleanup rules must remain identical for role-loading outputs.
+- Excel read strategy should remain explicit and tested for current workbook formats.
+
 ## 6. Configuration Model Changes
 
 Extend `job_automation/config.yaml` with:
@@ -505,6 +614,8 @@ Extend `job_automation/config.yaml` with:
 - `validation`: keyword dictionaries, thresholds, deny patterns
 - `output`: docx template path and output directory
 - `data_checker`: enabled flag, mode, target workbooks, backfill/refetch limits, and report output path
+- `dataframe`: `engine`, `allow_fallback_to_pandas`, and optional parity-check toggle for canary runs
+- `resume_tailoring`: enablement, keyword thresholds, task selection limits, and resume output paths
 
 ## 7. Data and Filesystem Impacts
 
@@ -531,6 +642,10 @@ Extend `job_automation/config.yaml` with:
 - `employment_type_normalized`
 - `employment_filter_status`
 - `employment_filter_reason`
+- `resume_keywords`
+- `resume_selected_tasks`
+- `resume_draft_path`
+- `resume_rewrite_notes`
 
 ### 7.2 Artifact Layout
 
@@ -538,7 +653,9 @@ Extend `job_automation/config.yaml` with:
 job_automation/
 ├── output/
 │   ├── docs/
-│   │   └── <job_id>.docx
+│   │   ├── <job_id>.docx
+│   │   └── resume/
+│   │       └── <job_id>_resume.docx
 │   └── logs/
 │       ├── ai_costs_YYYYMMDD.csv
 │       ├── completeness_report_YYYYMMDD.json    # data_checker audit report
@@ -563,6 +680,8 @@ Backup copies of mutated workbooks are written alongside the originals with a ti
 10. Data checker defaults to dry-run and audit-only — no mutations happen unless explicitly enabled via config.
 11. Checker is idempotent: re-running on already-correct rows produces the same COMPLETE outcome and no writes.
 12. Schema evolution is forward-compatible: `_migrate_columns()` in `ExcelTracker` adds new columns to existing workbooks without touching existing data. Checkers and adapters must handle null values in newly added columns gracefully.
+13. Dataframe portability guardrail: adapter layer keeps business logic independent from pandas/Polars API specifics.
+14. Cutover safety guardrail: Polars promotion requires parity pass and supports immediate rollback via config.
 
 ## 9. Security and Compliance
 

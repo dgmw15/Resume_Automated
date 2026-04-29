@@ -12,6 +12,8 @@ Implement the five approved changes in one coherent rollout:
 6. Salary capture from scraped listings with normalized fields for downstream filtering and ranking.
 7. Optional employment-type filtering to exclude internships and/or contract roles.
 8. Initial data completeness checker with optional deterministic backfill for missing fields.
+9. Migration of dataframe operations from pandas to Polars for improved speed and memory usage.
+10. ATS-style resume tailoring agent flow that extracts JD keywords, selects 3-4 relevant tasks, and rewrites resume content with those keywords.
 
 ## 2. Delivery Strategy
 
@@ -27,6 +29,19 @@ Exit criteria:
 
 - Existing scrape loop still runs.
 - New config loads without runtime errors.
+
+### Phase 1.5: Pandas-to-Polars Preparation
+
+- Inventory all pandas usage points and classify each by operation type and risk.
+- Introduce a small dataframe engine abstraction for role-loading and table transformations.
+- Add a config flag (`dataframe.engine`) to support controlled A/B rollout (`pandas` then `polars`).
+- Keep workbook schema and tracker output unchanged during migration.
+
+Exit criteria:
+
+- Every pandas usage site has a mapped Polars replacement path.
+- Engine abstraction supports current behavior with `pandas` mode enabled.
+- Rollback path is one-step by config flip.
 
 ### Phase 2: Salary Capture and Normalization
 
@@ -114,6 +129,20 @@ Exit criteria:
 - Reviewer can open generated document directly from tracked path.
 - Temporary failed artifacts are cleaned within configured retention window.
 
+### Phase 8.5: Resume Tailoring Agents (ATS-Style)
+
+- Add a lightweight ATS keyword extractor to pull role-specific terms from JD text.
+- Add deterministic task selection that picks 3-4 most relevant tasks based on keyword coverage and role alignment.
+- Add a resume rewriter that produces keyword-rich bullets while preserving truthfulness and original task meaning.
+- Persist keywords, selected tasks, and rewrite rationale in tracker for auditability.
+- Add DOCX output option for tailored resume draft as a separate artifact.
+
+Exit criteria:
+
+- Each tailored resume draft includes traceable keywords and the 3-4 selected tasks.
+- Output is deterministic given the same JD + task list input.
+- Drafts are stored with a stable path in the tracker.
+
 ### Phase 9: Test Suite Alignment and Portability Hardening
 
 - Remove or update stale tests that reference deleted APIs.
@@ -125,6 +154,19 @@ Exit criteria:
 - Test modules align with current production APIs.
 - Critical-path tests run in the project venv.
 - No portability regressions in budget-ledger startup path.
+
+### Phase 9.5: Polars Cutover and Dependency Cleanup
+
+- Run parity tests on representative role/input workbooks in both engines.
+- Capture runtime and memory metrics for role-loading and pre-processing flow.
+- Promote `polars` to default only after parity and stability checks pass.
+- Remove direct pandas dependency from active runtime path after cutover confidence.
+
+Exit criteria:
+
+- Output parity checks pass for status-critical columns and role lists.
+- Memory use improves or remains neutral for baseline workloads.
+- Polars is default and pandas is optional or removed per final policy.
 
 ### Phase 10: Data Completeness Check + Backfill
 
@@ -161,6 +203,15 @@ Exit criteria:
 - `job_automation/tests/test_docx_renderer.py`: keep tests aligned with current DOCX renderer APIs.
 - `job_automation/core/data_checker.py`: workbook-level completeness audit and optional backfill orchestration.
 - `job_automation/tests/test_data_checker.py`: deterministic completeness and recovery behavior tests.
+- `job_automation/core/dataframe_engine.py` (new): unified dataframe read/select helpers for pandas and Polars modes.
+- `job_automation/core/orchestrator.py`: migrate role-loading path to dataframe engine abstraction.
+- `job_automation/trawl.py`: migrate role-loading path to dataframe engine abstraction.
+- `job_automation/tests/test_dataframe_engine.py` (new): parity and fallback tests for pandas vs Polars modes.
+- `job_automation/ai/ats_keyword_extractor.py`: extract JD keywords and phrases for ATS matching.
+- `job_automation/ai/task_selector.py`: select 3-4 most relevant tasks from a provided task list.
+- `job_automation/ai/resume_rewriter.py`: rewrite bullets using selected tasks and keywords.
+- `job_automation/output/docx_renderer.py`: add optional resume draft template output (reuse docx renderer).
+- `job_automation/tests/test_resume_tailoring.py`: regression tests for keyword extraction, task selection, and rewrite stability.
 
 ## 3.2 Salary Data Contract
 
@@ -220,6 +271,7 @@ Add these top-level keys:
 - `output`
 - `salary`
 - `employment_filter`
+- `resume_tailoring`
 
 Suggested starting values:
 
@@ -266,6 +318,16 @@ Data checker suggested keys:
 - `data_checker.write_backup: true`
 - `data_checker.report_path: "output/logs/data_completeness_YYYYMMDD.json"`
 
+Resume tailoring suggested keys:
+
+- `resume_tailoring.enabled: true`
+- `resume_tailoring.max_tasks: 4`
+- `resume_tailoring.min_tasks: 3`
+- `resume_tailoring.keyword_min_count: 8`
+- `resume_tailoring.output_dir: "output/docs/resume"`
+- `resume_tailoring.template_path: "output/templates/resume_template.docx"`
+- `resume_tailoring.rewrite_style: "impact-first"`
+
 ## 3.5 Excel Tracker Evolution
 
 Add columns:
@@ -291,6 +353,10 @@ Add columns:
 - `employment_type_normalized`
 - `employment_filter_status`
 - `employment_filter_reason`
+- `resume_keywords`
+- `resume_selected_tasks`
+- `resume_draft_path`
+- `resume_rewrite_notes`
 
 Backward compatibility plan:
 
@@ -321,6 +387,33 @@ Recovery order:
 1. Recompute from local `salary_raw` using parser.
 2. If still unresolved and allowed, refetch salary from source URL.
 3. Persist result with recovery status and reason.
+
+## 3.7 Pandas-to-Polars Migration Contract
+
+Current in-scope dataframe surface:
+
+- Role Excel loading in `trawl.py`.
+- Role Excel loading in `core/orchestrator.py`.
+
+Migration rules:
+
+- Preserve role-list output semantics (values, trimming, order).
+- Preserve compatibility with existing Excel role workbook structure.
+- Keep failure behavior deterministic (clear fallback logs, no silent schema drift).
+
+Execution sequence:
+
+1. Build dataframe engine wrapper with two implementations: pandas and Polars.
+2. Route existing role-loading call sites through wrapper (no logic change first).
+3. Add parity tests for role extraction from identical fixtures.
+4. Add lightweight performance harness to compare speed and memory per engine.
+5. Flip default engine to Polars after parity + baseline checks pass.
+
+Acceptance gates:
+
+- Zero functional diff in role values loaded from fixture workbooks.
+- No regression in scrape/orchestrator startup behavior.
+- Measured memory reduction for medium and large role files.
 
 ## 4. Automation Timing Model
 
@@ -367,6 +460,66 @@ This keeps processing slow and cost-aware while still meeting the 24h objective.
 12. Validator role mismatch risk: choose keyword profile from each row role/title, not one global default.
 13. Reservation audit gaps: persist reservation id, expiry, reserved cost, and actual cost in tracker rows.
 14. Silent data quality drift risk: enforce pre-pipeline completeness checks and explicit unresolved tagging.
+15. Dataframe API mismatch risk: isolate pandas vs Polars differences behind wrapper functions.
+16. Excel reader capability risk: validate selected Polars Excel path against current workbook formats.
+17. Migration rollback risk: keep config-level fallback to pandas until two consecutive stable runs.
+
+### Current Failure Analysis (2026-04-25)
+
+Observed failure state:
+
+- `pytest -q job_automation/tests/test_docx_renderer.py` fails with spacing/content-preservation assertions.
+- Full suite collection for provider/batch tests fails on Windows import path before test execution.
+
+Verified root causes:
+
+1. DOCX sanitizer removes regular spaces:
+	- File: `job_automation/output/docx_renderer.py`
+	- Current regex in `_sanitise_content()` uses `[ ^\\S\\n\\t ]` pattern branch (without spaces in actual code), which matches regular spaces and strips them.
+	- Effect: output text collapses words (`"Jane Doe" -> "JaneDoe"`), causing renderer formatting/content tests to fail.
+
+2. Budget ledger is POSIX-locked at import time:
+	- File: `job_automation/core/budget_ledger.py`
+	- `import fcntl` occurs at module import-time; Windows has no `fcntl`.
+	- Effect: `ModuleNotFoundError` during test collection for provider/batch modules, so critical tests never run on Windows.
+
+3. Idempotency replay payload behavior is incomplete against critical prompt contract:
+	- File: `job_automation/ai/provider_router.py`
+	- Replay returns placeholder text (`[DEDUPLICATED — see original committed result]`) instead of previously committed logical payload.
+	- Effect: does not satisfy the stronger replay requirement in critical prompts 11/13.
+
+Remediation plan (no-code planning)
+
+Phase A: Stabilize failing critical paths first
+
+1. Fix sanitizer contract to preserve normal spaces while still removing control chars.
+2. Add/adjust regression tests to explicitly protect whitespace preservation in DOCX output.
+3. Re-run `test_docx_renderer.py` and require full pass before moving on.
+
+Phase B: Restore Windows portability for budget/provider path
+
+1. Replace import-time POSIX lock dependency with runtime platform-aware lock strategy.
+2. Keep equivalent lock semantics for POSIX and a Windows-safe path.
+3. Re-run collection + provider/batch/budget tests on Windows; block release if import-time failures remain.
+
+Phase C: Complete replay/idempotency contract
+
+1. Define persisted replay artifact contract (what exact payload fields must be returned on replay).
+2. Update router/ledger interaction model to return prior committed logical result payload, not placeholder text.
+3. Add replay integrity tests proving: no re-charge, no duplicate output, and exact replay payload return.
+
+Phase D: Gate-based verification and status update
+
+1. Run targeted suites in order: docx, budget ledger, provider router, batch processor.
+2. Run full project suite on Windows after targeted pass.
+3. Update prompt completion status only after objective green evidence.
+
+Acceptance gates for closure
+
+- DOCX gate: all tests in `job_automation/tests/test_docx_renderer.py` pass, including spacing/content assertions.
+- Portability gate: no `ModuleNotFoundError` for budget/provider modules on Windows import and test collection.
+- Idempotency gate: replay returns previously committed payload and does not consume additional budget.
+- Integration gate: provider/batch/docx critical suites pass together in one Windows run.
 
 ## 6. Test Plan
 
@@ -388,6 +541,11 @@ Minimum automated tests to add:
 14. Reservation metadata tests proving tracker captures reserve/commit lifecycle fields.
 15. Data-checker tests for missing, inconsistent, recovered, and unresolved row classifications.
 16. Idempotency tests proving repeated checker runs do not mutate already-correct rows.
+17. Dataframe parity tests proving pandas and Polars return identical role lists on shared fixtures.
+18. Startup fallback tests proving pandas engine is used when Polars read path fails.
+19. Performance smoke test capturing relative runtime and memory for role loading.
+20. Resume tailoring tests for keyword extraction stability and task selection determinism.
+21. Resume rewrite tests verifying keyword inclusion without meaning drift.
 
 Manual checks:
 
@@ -416,6 +574,8 @@ Manual checks:
 8. Platform portability: budget ledger and batch flow work on Windows and POSIX.
 9. Test alignment: critical test suites target current production interfaces.
 10. Data quality gate: missing/inconsistent data is detected before pipeline stages and recoverable gaps are backfilled deterministically.
+11. Dataframe migration: Polars path is functionally equivalent on baseline inputs and improves resource profile.
+12. Resume tailoring: ATS keywords are extracted, 3-4 tasks are selected, and a draft resume artifact is produced deterministically.
 
 ## 8. Recommended Execution Order (Practical)
 
@@ -428,4 +588,6 @@ Manual checks:
 7. Implement DOCX rendering and review handoff.
 8. Align and harden tests to current APIs and platform constraints.
 9. Implement and validate data completeness checker (audit mode, then recover mode).
-10. Run full integration and tune keyword thresholds on real SG samples.
+10. Implement dataframe engine abstraction and pandas/Polars parity tests.
+11. Run Polars canary with rollback guard (`dataframe.engine`), then promote default.
+12. Run full integration and tune keyword thresholds on real SG samples.
