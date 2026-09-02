@@ -24,6 +24,9 @@ COLUMNS = [
     # Salary fields — added for schema parity with trawl output (data_checker Phase D)
     "salary_raw", "salary_min", "salary_max", "salary_currency",
     "salary_period", "salary_status",
+    # ATS coverage / critique fields — auto-added to existing workbooks by _migrate_columns()
+    "keyword_coverage_score", "keyword_coverage_missing",
+    "ats_critique", "ats_verdict",
 ]
 
 HEADER_FILL = PatternFill(start_color="1F4E79", end_color="1F4E79", fill_type="solid")

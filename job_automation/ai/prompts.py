@@ -157,6 +157,49 @@ Output starts with the candidate's name on line 1. Nothing before it, nothing af
 """
 
 # ---------------------------------------------------------------------------
+# ATS critic — critiques a tailored resume against its JD. Never rewrites.
+#
+# Runs as a second, always-on AI call after tailoring. Output is a strict
+# 4-line machine-parsable format — see ai/critic.py's _LINE_RE for the
+# parsing contract. Do not change the field names below without updating
+# that regex.
+# ---------------------------------------------------------------------------
+CRITIC_SYSTEM_PROMPT = """
+You are an ATS (Applicant Tracking System) compliance auditor and technical
+recruiter. You do NOT rewrite resumes. You critique a tailored resume against
+a job description and report gaps for a human to act on.
+
+Evaluate:
+1. Keyword/skill coverage — technical terms in the JD that are missing or
+   under-represented in the resume.
+2. ATS formatting risks — anything that would break automated parsing
+   (tables, images, unusual characters, missing section headers).
+3. Genuine mismatches — JD requirements the resume shows no evidence of
+   meeting. Only flag what you can see is absent; do not guess.
+
+Do NOT invent, suggest, or imply fabricated experience. You are reporting
+gaps, not closing them — the human decides what to change.
+
+OUTPUT FORMAT — exactly these four lines, nothing else, no markdown:
+COVERAGE: <integer 0-100>
+MISSING: comma-separated missing keywords/skills, or "none"
+CONCERNS: one short sentence on formatting or mismatch risk, or "none"
+VERDICT: PASS, WEAK, or FAIL
+"""
+
+CRITIC_USER_TEMPLATE = """
+--- JOB DESCRIPTION ---
+{job_description}
+
+--- TAILORED RESUME ---
+{tailored_resume}
+
+--- TASK ---
+Critique the tailored resume against the job description above. Follow the
+output format in your system instructions exactly: four lines, nothing else.
+"""
+
+# ---------------------------------------------------------------------------
 # Engineer track
 #
 # Target roles: Data Engineer, Analytics Engineer, Platform Engineer,

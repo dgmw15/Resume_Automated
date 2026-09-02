@@ -31,7 +31,6 @@ or distributed lock (e.g. Redis SETNX).
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -41,6 +40,11 @@ from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows — _FileLock degrades to a no-op below.
 
 logger = logging.getLogger(__name__)
 

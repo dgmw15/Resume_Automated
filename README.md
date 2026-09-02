@@ -33,7 +33,7 @@ The system runs in three phases, continuously:
 2. **Validate** — Every scraped JD is checked against a technical keyword list and a deny-pattern list (e.g. "insurance agent"). Non-matching listings are filtered out with no AI spend.
 3. **AI Batch** — Validated listings are queued and processed in controlled batches. Claude reads the raw JD and your base resume, then rewrites the resume to highlight matching skills — without hallucinating anything. The tailored text is saved to Excel and rendered as a DOCX file.
 
-A Streamlit review UI lets you read each tailored resume and mark it APPROVED or REJECTED before sending.
+A local review UI (stdlib http.server, no framework) lets you read each tailored resume and mark it APPROVED or REJECTED before sending.
 
 ---
 
@@ -58,8 +58,10 @@ A Streamlit review UI lets you read each tailored resume and mark it APPROVED or
 │            └── core/batch_processor.py                              │
 │                 ├── ai/pipeline.py        (track selector)           │
 │                 ├── ai/tailor.py          (prompt builder)           │
-│                 ├── ai/provider_router.py (Anthropic / OpenRouter)   │
-│                 │    └── BudgetGuard      (daily + monthly caps)     │
+│                 ├── ai/provider_router.py (Claude Code / Anthropic / OpenRouter) │
+│                 │    └── core/budget_ledger.py (BudgetLedger — daily + monthly caps) │
+│                 ├── ai/keyword_coverage.py (free, deterministic post-check) │
+│                 ├── ai/critic.py          (optional ATS critique, never rewrites) │
 │                 └── output/docx_renderer.py  (→ .docx file)         │
 │                                                                      │
 │  data/tracker.py  (ExcelTracker — Database.xlsx — shared state)     │
@@ -71,7 +73,7 @@ A Streamlit review UI lets you read each tailored resume and mark it APPROVED or
   └── prompt_pipeline.py     — build AI prompts from trawl results
 
   Review:
-  └── web_ui/app.py          — Streamlit UI (APPROVED / REJECTED)
+  └── web_ui/app.py          — Local review UI (APPROVED / REJECTED)
 ```
 
 ### Key design decisions
@@ -99,10 +101,11 @@ Each track has a dedicated system prompt (`ai/prompts.py`) with focus areas and 
 
 `ai/provider_router.py` tries providers in the configured `fallback_order`:
 
-- **Anthropic** (primary) — reads `ANTHROPIC_API_KEY` from `.env`
-- **OpenRouter** (fallback) — reads `OPENROUTER_API_KEY` from `.env`
+- **Claude Code** (optional, subscription-billed) — shells out to the `claude` CLI (`claude -p`). Run `claude /login` once, and make sure `ANTHROPIC_API_KEY` is **unset** in the shell you run from — it self-skips (falls through to the next provider) otherwise.
+- **Anthropic** (API key) — reads `ANTHROPIC_API_KEY` as a real environment variable. No `.env` loader is wired in, so a `.env` file alone does nothing — set it in your shell.
+- **OpenRouter** (fallback) — reads `OPENROUTER_API_KEY` the same way.
 
-The `BudgetGuard` tracks in-process spend and raises `BudgetExceededError` when a cap is hit, stopping the batch cycle cleanly.
+`core/budget_ledger.py`'s `BudgetLedger` persists spend to `budget_ledger.json` (file-locked, atomic across concurrent workers — file locking degrades to a no-op on Windows, so it's single-process-safe there) and raises `BudgetExceededError` when a cap is hit. The `claude_code` provider always reports `$0.00` cost since it draws from your subscription rather than the metered API.
 
 ---
 
@@ -121,12 +124,12 @@ NEW
                      └─→ AI_IN_PROGRESS
                           ├─→ TAILORED_TEXT_READY
                           │    └─→ DOCX_READY      (← DOCX file written)
-                          │         └─→ APPROVED    (set via Streamlit UI)
+                          │         └─→ APPROVED    (set via review UI)
                           │              └─→ SUBMITTED
                           └─→ FAILED               (max retries exceeded)
 ```
 
-You interact with the `DOCX_READY` rows in the Streamlit UI, setting them to `APPROVED` or `REJECTED`.
+You interact with the `DOCX_READY` rows in the review UI, setting them to `APPROVED` or `REJECTED`.
 
 ---
 
@@ -136,8 +139,11 @@ You interact with the `DOCX_READY` rows in the Streamlit UI, setting them to `AP
 job_automation/
 ├── main.py                      # Crash-restart entry point
 ├── trawl.py                     # Standalone scraper (→ trawl_results.xlsx)
+├── run_one_job_smoketest.py     # Live end-to-end test: real login, scrape, tailor ONE job
+├── run_pipeline_sample.py       # Run N already-scraped rows through the pipeline, no login needed
 ├── prompt_pipeline.py           # Batch AI enrichment from trawl results
 ├── skills_filter_pipeline.py    # Populate skills/continue columns
+├── base_resume.txt              # Your master resume — you create this, gitignored
 ├── config.yaml                  # All runtime settings (edit this)
 ├── requirements.txt
 ├── run.bat                      # Windows: activate venv + run main.py
@@ -155,16 +161,21 @@ job_automation/
 │   ├── jd_validator.py          # Deterministic keyword/deny-pattern filter
 │   ├── jd_signal_extractor.py   # Extracts structured signals from a JD
 │   ├── skills_signal_extractor.py
-│   ├── provider_router.py       # BudgetGuard + provider fallback
+│   ├── keyword_coverage.py      # Free, deterministic post-tailoring coverage score
+│   ├── critic.py                # Optional AI ATS critique (never rewrites)
+│   ├── employment_filter.py     # Internship/contract filter
+│   ├── provider_router.py       # BudgetLedger + provider fallback
 │   ├── tailor.py                # Builds the final prompt, calls router.generate()
 │   └── providers/
 │       ├── base.py              # BaseProvider, ProviderResult, BudgetExceededError
 │       ├── anthropic_client.py  # Anthropic SDK integration
+│       ├── claude_code_client.py # Subscription auth via the `claude -p` CLI
 │       └── openrouter_client.py # OpenRouter REST integration
 │
 ├── core/
 │   ├── orchestrator.py          # Three-phase run loop
 │   ├── batch_processor.py       # SLA-aware batch worker
+│   ├── budget_ledger.py         # BudgetLedger — persistent, file-locked spend cap
 │   ├── session_manager.py       # Playwright browser context lifecycle
 │   ├── rate_limiter.py          # Per-portal delay + hourly action cap
 │   └── login_utils.py           # Shared browser helpers
@@ -174,7 +185,7 @@ job_automation/
 │   └── tracker.py               # ExcelTracker — read/write Database.xlsx
 │
 ├── web_ui/
-│   └── app.py                   # Streamlit review UI
+│   └── app.py                   # Local review UI (stdlib http.server)
 │
 ├── input/
 │   └── skills_input.xlsx        # Skill patterns (auto-created, then editable)
@@ -221,13 +232,13 @@ pip install -r requirements.txt
 
 These are the things that are personal to you and not included in the repo.
 
-### 1. `.env` — API keys
+### 1. API keys — environment variables
 
-Create this file at the repo root (`Resume/.env`):
+No `.env` loader is wired into the code, so set these as real environment variables in the shell you run the scripts from (e.g. `$env:ANTHROPIC_API_KEY = "sk-ant-..."` in PowerShell) — a `.env` file alone does nothing:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
-OPENROUTER_API_KEY=sk-or-...   # optional, only needed as fallback
+ANTHROPIC_API_KEY=sk-ant-...    # leave unset entirely to use the claude_code (subscription) provider instead
+OPENROUTER_API_KEY=sk-or-...    # optional, only needed as fallback
 ```
 
 ### 2. `job_automation/base_resume.txt` — your resume
@@ -284,7 +295,7 @@ Run `python skills_filter_pipeline.py` once to auto-generate this file, then edi
 4.  cd job_automation
 5.  python main.py          (or double-click run.bat on Windows)
 6.  Leave it running. Every 5 minutes it scrapes → validates → batches.
-7.  Open the Streamlit UI to review DOCX_READY rows.
+7.  Open the review UI (http://localhost:8765) to review DOCX_READY rows.
 8.  Approve what looks good, download the DOCX, apply manually.
 ```
 
@@ -306,18 +317,18 @@ Step 3 — AI enrichment
     → calls Claude, writes prompts/responses to output/
 
 Step 4 — Review
-    streamlit run web_ui/app.py
-    → approve the ones you like
+    python web_ui/app.py
+    → open http://localhost:8765, approve the ones you like
 ```
 
-### Streamlit review UI
+### Review UI
 
 ```bash
 cd job_automation
-streamlit run web_ui/app.py
+python web_ui/app.py
 ```
 
-The UI shows each `DOCX_READY` row with the tailored resume text and the original JD. Use it to:
+Opens a local review page at `http://localhost:8765` (stdlib `http.server`, no framework, no auto-refresh — reload the page for new jobs). Shows each `DOCX_READY` row with the tailored resume text and the original JD. Use it to:
 - Read the tailored resume
 - Download the DOCX
 - Set status to `APPROVED` or `REJECTED`
@@ -356,6 +367,7 @@ validation:
 ai:
   provider: "anthropic"        # primary provider
   fallback_order:
+    - "claude_code"             # subscription auth via `claude` CLI — self-skips if ANTHROPIC_API_KEY is set
     - "anthropic"
     - "openrouter"
   model_map:
@@ -387,11 +399,13 @@ All commands assume you are inside `job_automation/` with the venv active.
 | Script | Command | Purpose |
 |---|---|---|
 | Full system | `python main.py` | Runs all three phases in a loop, auto-restarts on crash |
+| One-job smoke test | `python run_one_job_smoketest.py --role "Data Analyst"` | Live login + scrape + tailor exactly one job — verifies the pipeline end-to-end before a long run |
+| Sample from trawl | `python run_pipeline_sample.py --count 5` | Runs N already-scraped `trawl_results.xlsx` rows through filter → validate → tailor, no browser/login needed |
 | Scrape only | `python trawl.py` | Saves listings to `trawl_results.xlsx` |
 | Data checker | `python check_data.py` | Audit trawl workbook for missing/inconsistent fields |
 | Skills filter | `python skills_filter_pipeline.py` | Adds skills/continue columns to trawl results |
 | AI pipeline | `python prompt_pipeline.py` | Runs Claude on rows where `continue = 1` |
-| Review UI | `streamlit run web_ui/app.py` | Opens the Streamlit review interface |
+| Review UI | `python web_ui/app.py` | Opens the review interface at http://localhost:8765 |
 | Tests | `pytest tests/` | Runs the full test suite |
 
 **Windows shortcuts:**
@@ -512,7 +526,10 @@ pytest tests/ -v
 Test coverage includes:
 - `test_jd_validator.py` — keyword scoring and deny-pattern logic
 - `test_pipeline_selector.py` — analyst/engineer track selection
-- `test_provider_router.py` — fallback and budget guard behaviour
+- `test_budget_ledger.py` — cap enforcement, idempotency, expiry
+- `test_claude_code_client.py` — subscription-CLI provider (mocked subprocess)
+- `test_critic.py` — ATS critique parsing
+- `test_keyword_coverage.py` — deterministic post-tailoring coverage score
 - `test_batch_processor.py` — SLA batch sizing and retry logic
 - `test_salary_parser.py` — salary parsing, currency detection, period inference
 - `test_employment_filter.py` — internship/contract filter toggles and unknown policy

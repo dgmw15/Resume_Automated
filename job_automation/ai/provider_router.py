@@ -78,6 +78,9 @@ class ProviderRouter:
         if name == "openrouter":
             from ai.providers.openrouter_client import OpenRouterProvider
             return OpenRouterProvider()
+        if name == "claude_code":
+            from ai.providers.claude_code_client import ClaudeCodeProvider
+            return ClaudeCodeProvider()
         raise ValueError(f"Unknown provider: {name!r}")
 
     def model_for_track(self, track: str) -> str:

@@ -39,7 +39,7 @@ from typing import Optional
 
 from docx import Document
 from docx.oxml.ns import qn
-from docx.shared import Pt, RGBColor
+from docx.shared import Inches, Pt, RGBColor
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,28 @@ DEFAULT_OUTPUT_DIR = Path("output/docs")
 DEFAULT_TEMP_RETENTION_HOURS = 24
 _MAX_JOB_ID_LEN = 128
 _MAX_CONTENT_LEN = 50_000
+
+# Compact page layout — a blank python-docx Document() inherits Word's default
+# template, which sets 1.25"/1.0" margins and (buried in styles.xml
+# docDefaults, not visible via python-docx's paragraph_format API) 10pt of
+# space AFTER EVERY PARAGRAPH plus 1.15 line spacing. Across a ~60-paragraph
+# resume that default alone is ~8 inches of pure inter-paragraph whitespace —
+# the dominant reason an otherwise normal-length resume renders at 4 pages.
+# These constants override both the margins and the per-paragraph spacing
+# explicitly so the page count reflects the actual content, not template
+# defaults nobody asked for.
+_PAGE_MARGIN_INCHES = 0.5
+
+# (space_before_pt, space_after_pt, line_spacing, font_pt) per _LineType.
+_LINE_FORMAT: dict[str, tuple[float, float, float, float]] = {
+    "name": (0, 1, 1.0, 15),
+    "contact": (0, 5, 1.0, 9.5),
+    "section": (5, 2, 1.0, 11),
+    "role": (2, 0, 1.0, 10),
+    "bullet": (0, 1, 1.0, 10),
+    "body": (0, 2, 1.0, 10),
+    "empty": (0, 0, 1.0, 3),  # near-zero-height spacer, not another 10pt gap
+}
 
 # Known section header keywords (title-cased forms; matched case-insensitively)
 _SECTION_KEYWORDS = frozenset({
@@ -56,14 +78,30 @@ _SECTION_KEYWORDS = frozenset({
     "employment", "qualifications", "profile",
 })
 
-# Regex that identifies a role/employer line: contains "|" or "–" with date-ish text
-_ROLE_RE = re.compile(
-    r"(?:[|–\-].*(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4}|present))",
-    re.IGNORECASE,
-)
+# Regex that identifies a role/employer line: "Company | Title | Mon YYYY - Mon YYYY".
+# Requires the pipe delimiter the output-format contract mandates (see
+# ai/prompts.py _OUTPUT_FORMAT), plus a year or "present".
+#
+# NOTE: a previous version matched on any "|" OR "-" (not just "|"), followed
+# anywhere later in the line by a month-abbreviation substring. Since every
+# bullet line starts with "-", and 3-letter month abbreviations are common
+# word fragments (Django contains "jan", innovative/november contain "nov",
+# august/augment contain "aug", december/doctor contain "dec"...), that
+# matched a large fraction of ordinary bullets as ROLE lines — which skips
+# the bullet dash-stripping, so they rendered as "-  Some bullet text" in
+# italics instead of a proper bullet. Requiring "|" plus an actual year (the
+# format the AI is instructed to always emit) removes the false positives.
+_ROLE_RE = re.compile(r"\|.*(?:\d{4}|\bpresent\b)", re.IGNORECASE)
 
 # Job-id allowed characters: alphanumeric, dash, underscore; must start with alnum
 _JOB_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_\-]{0,127}$')
+
+# Control characters to strip, excluding LF (\x0a) and TAB (\x09).
+# NOTE: a previous version of this pattern was `[^\S\n\t]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]`.
+# `[^\S\n\t]` is the negation of "non-whitespace, LF, TAB" — i.e. it matches
+# ALL OTHER WHITESPACE, including the literal space character, so it stripped
+# every space out of every resume. Fixed to only match actual control chars.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 # Strip XML/HTML tags
 _XML_TAG_RE = re.compile(r"<[^>]+>")
@@ -141,7 +179,10 @@ def _validate_output_path(output_dir: Path, filename: str) -> Path:
     """
     resolved_dir = Path(output_dir).resolve()
     resolved_path = (resolved_dir / filename).resolve()
-    if not str(resolved_path).startswith(str(resolved_dir)):
+    # NOTE: a plain str.startswith(resolved_dir) check is a classic bypass —
+    # "/out/docs2/x" starts with "/out/docs" even though it's a sibling
+    # directory, not a child. Use real path containment instead.
+    if resolved_path != resolved_dir and resolved_dir not in resolved_path.parents:
         raise ValueError(
             f"Output path {resolved_path!r} escapes output directory {resolved_dir!r}."
         )
@@ -168,7 +209,7 @@ def _sanitise_content(text: object) -> str:
     text = text.replace("\r\n", "\n").replace("\r", "\n")
 
     # Strip control characters except LF (\n) and TAB (\t)
-    text = re.sub(r"[^\S\n\t]|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = _CONTROL_CHAR_RE.sub("", text)
 
     # Strip XML/HTML tags
     text = _XML_TAG_RE.sub("", text)
@@ -370,39 +411,52 @@ class DocxRenderer:
         return Document()
 
     def _write_content(self, doc: Document, text: str) -> None:
-        """Classify lines and write with appropriate formatting."""
+        """Classify lines and write with appropriate, page-count-conscious formatting."""
+        if self._template_path is None:
+            for section in doc.sections:
+                section.left_margin = Inches(_PAGE_MARGIN_INCHES)
+                section.right_margin = Inches(_PAGE_MARGIN_INCHES)
+                section.top_margin = Inches(_PAGE_MARGIN_INCHES)
+                section.bottom_margin = Inches(_PAGE_MARGIN_INCHES)
+
         lines = text.splitlines()
         classified = _classify_lines(lines)
 
         for cl in classified:
             para = doc.add_paragraph()
+            space_before, space_after, line_spacing, font_pt = _LINE_FORMAT[cl.kind.value]
+            pf = para.paragraph_format
+            pf.space_before = Pt(space_before)
+            pf.space_after = Pt(space_after)
+            pf.line_spacing = line_spacing
+
             if cl.kind == _LineType.EMPTY:
-                continue  # leave paragraph empty as spacer
+                continue  # blank spacer line — height already minimised via _LINE_FORMAT
 
             run = para.add_run(cl.text)
+            run.font.size = Pt(font_pt)
 
             if cl.kind == _LineType.NAME:
                 run.bold = True
-                run.font.size = Pt(14)
 
             elif cl.kind == _LineType.CONTACT:
-                run.font.size = Pt(10)
                 run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
 
             elif cl.kind == _LineType.SECTION:
                 run.bold = True
-                run.font.size = Pt(12)
 
             elif cl.kind == _LineType.ROLE:
                 run.italic = True
-                run.font.size = Pt(11)
 
             elif cl.kind == _LineType.BULLET:
                 para.style = doc.styles["List Bullet"] if "List Bullet" in [s.name for s in doc.styles] else para.style
-                run.font.size = Pt(11)
+                # Re-apply spacing: assigning a built-in style resets paragraph_format.
+                pf = para.paragraph_format
+                pf.space_before = Pt(space_before)
+                pf.space_after = Pt(space_after)
+                pf.line_spacing = line_spacing
 
-            else:  # BODY
-                run.font.size = Pt(11)
+            # else: BODY — font size already set above, no extra styling
 
     def _validate(self, path: Path) -> None:
         """

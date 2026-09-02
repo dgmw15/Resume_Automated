@@ -55,13 +55,9 @@ class SessionManager:
         if portal_name in self._contexts:
             return self._contexts[portal_name]
 
-        state_file = SESSION_DIR / f"{portal_name}.json"
-        storage_state = str(state_file) if state_file.exists() else None
-
         context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(SESSION_DIR / portal_name),
             headless=False,          # Visible so the user can solve CAPTCHAs
-            storage_state=storage_state,
             viewport={"width": 1280, "height": 800},
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

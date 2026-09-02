@@ -211,6 +211,17 @@ class TestValidateOutputPath:
         with pytest.raises(ValueError, match="escapes"):
             _validate_output_path(tmp_path, "../outside.docx")
 
+    def test_sibling_directory_with_shared_prefix_rejected(self, tmp_path):
+        """
+        A plain str.startswith(output_dir) check would wrongly let this
+        through: "<tmp_path>docs2/x.docx" starts with "<tmp_path>docs" as a
+        string even though docs2 is a sibling directory, not a child of docs.
+        """
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        with pytest.raises(ValueError, match="escapes"):
+            _validate_output_path(docs_dir, "../docs2/x.docx")
+
 
 # ---------------------------------------------------------------------------
 # Line classifier
@@ -241,6 +252,31 @@ class TestClassifyLines:
     def test_role_line_detected(self):
         lines = _classify_lines(["Name", "", "EXPERIENCE", "Acme | Engineer | Jan 2022"])
         assert lines[-1].kind == _LineType.ROLE
+
+    def test_bullet_containing_month_substring_not_misclassified_as_role(self):
+        """
+        Regression test: bullets starting with "-" that happen to contain a
+        3-letter month-abbreviation substring (Django->jan, innovative->nov,
+        august/augment->aug, december/doctor->dec...) must stay BULLET, not
+        get misclassified as ROLE (which used to skip dash-stripping and
+        left "-  " literally in the rendered text).
+        """
+        bullets = [
+            "- Shipped a Django-based platform used by four customers.",
+            "- Built an innovative pipeline that cut review time significantly.",
+            "- Automated deployments using augmented monitoring tooling.",
+            "- Delivered as the on-call doctor for the platform's SLA program.",
+        ]
+        for b in bullets:
+            lines = _classify_lines(["Name", "", "SECTION", b])
+            assert lines[-1].kind == _LineType.BULLET, f"misclassified: {b!r}"
+            assert not lines[-1].text.startswith("-")
+
+    def test_role_line_without_pipe_not_matched(self):
+        """A bullet with a bare hyphen and a date-like year should not be
+        mistaken for a role line just because it has a year in it."""
+        lines = _classify_lines(["Name", "", "SECTION", "- Migrated 2 legacy 2019-era services."])
+        assert lines[-1].kind == _LineType.BULLET
 
     def test_empty_line_classified(self):
         lines = _classify_lines(["Name", ""])

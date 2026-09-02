@@ -133,8 +133,12 @@ batch:
 # AI provider routing
 # ---------------------------------------------------------------------------
 ai:
-  provider: "anthropic"        # Primary provider: "openrouter" or "anthropic"
+  provider: "anthropic"        # Primary provider: "claude_code", "openrouter", or "anthropic"
   fallback_order:
+    # claude_code (Phase 2B, subscription-billed) is tried first but self-skips
+    # via EnvironmentError today because ANTHROPIC_API_KEY is set — falls
+    # straight through to anthropic. Unset ANTHROPIC_API_KEY to actually use it.
+    - "claude_code"
     - "anthropic"
     - "openrouter"
   model_map:
@@ -148,6 +152,17 @@ ai:
     budget_precision_decimals: 4   # Decimal places for cost comparisons and rounding
     cost_lock_timeout_seconds: 60  # Seconds before an unconfirmed reservation is expired
     reservation_cleanup_interval_seconds: 300  # How often the cleanup cadence runs
+
+# ---------------------------------------------------------------------------
+# Resume tailoring — ATS critic layer (Sub-project B)
+# ---------------------------------------------------------------------------
+resume_tailoring:
+  # When true, every successfully tailored job also gets a second, best-effort
+  # AI call that critiques (never rewrites) the tailored resume against the
+  # JD — surfaced in the review UI as coverage %, missing keywords, and a
+  # PASS/WEAK/FAIL verdict. A critique failure never fails the job. The free
+  # deterministic keyword-coverage check always runs regardless of this flag.
+  enable_ats_critic: true
 
 # ---------------------------------------------------------------------------
 # Output — generated artifacts

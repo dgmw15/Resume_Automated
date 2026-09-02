@@ -222,6 +222,69 @@ class TestIdempotencyKey:
         assert call_kwargs["idempotency_key"] == BatchProcessor._make_idempotency_key("job-idem")
 
 
+class TestCoverageAndCritic:
+    def test_keyword_coverage_written_on_success(self, base_resume_file):
+        tracker = MagicMock()
+        tracker.list_rows_by_status.return_value = [_make_row(raw_description="sql python tableau")]
+        mock_result = ProviderResult(
+            text="tailored resume mentioning sql and python",
+            model="m", provider="anthropic", estimated_cost_usd=0.01,
+        )
+        tailor = MagicMock()
+        tailor.generate.return_value = mock_result
+        proc = _make_processor(tracker, tailor)
+
+        with patch("core.batch_processor.BASE_RESUME_PATH", base_resume_file):
+            asyncio.run(proc.run_once())
+
+        coverage_calls = [
+            c for c in tracker.update.call_args_list
+            if "keyword_coverage_score" in c.kwargs
+        ]
+        assert len(coverage_calls) == 1
+        assert coverage_calls[0].kwargs["keyword_coverage_score"] > 0
+
+    def test_critic_invoked_and_result_written_when_configured(self, base_resume_file):
+        tracker = MagicMock()
+        tracker.list_rows_by_status.return_value = [_make_row()]
+        mock_result = ProviderResult(
+            text="tailored", model="m", provider="anthropic", estimated_cost_usd=0.01,
+        )
+        tailor = MagicMock()
+        tailor.generate.return_value = mock_result
+        critic = MagicMock()
+        from ai.critic import CritiqueResult
+        critic.critique.return_value = CritiqueResult(
+            coverage_pct=90, missing=[], concerns="none", verdict="PASS", raw_text="raw"
+        )
+        proc = BatchProcessor(tracker, tailor, _make_batch_cfg(), critic=critic)
+
+        with patch("core.batch_processor.BASE_RESUME_PATH", base_resume_file):
+            asyncio.run(proc.run_once())
+
+        critic.critique.assert_called_once()
+        ats_calls = [c for c in tracker.update.call_args_list if "ats_verdict" in c.kwargs]
+        assert len(ats_calls) == 1
+        assert ats_calls[0].kwargs["ats_verdict"] == "PASS"
+
+    def test_critic_failure_does_not_fail_job(self, base_resume_file):
+        tracker = MagicMock()
+        tracker.list_rows_by_status.return_value = [_make_row()]
+        mock_result = ProviderResult(
+            text="tailored", model="m", provider="anthropic", estimated_cost_usd=0.01,
+        )
+        tailor = MagicMock()
+        tailor.generate.return_value = mock_result
+        critic = MagicMock()
+        critic.critique.side_effect = RuntimeError("provider down")
+        proc = BatchProcessor(tracker, tailor, _make_batch_cfg(), critic=critic)
+
+        with patch("core.batch_processor.BASE_RESUME_PATH", base_resume_file):
+            count = asyncio.run(proc.run_once())
+
+        assert count == 1  # job still counts as processed despite critique failure
+
+
 class TestSLADrift:
     def test_sla_drift_warning_logged(self, caplog):
         """When queue_depth > max_clearable, a warning must be logged."""

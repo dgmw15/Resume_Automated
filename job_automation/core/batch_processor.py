@@ -23,6 +23,8 @@ import math
 import uuid
 from pathlib import Path
 
+from ai.critic import AtsCritic
+from ai.keyword_coverage import check_coverage
 from ai.pipeline import get_prompts, select_track
 from ai.providers.base import BudgetExceededError
 from ai.tailor import ResumeTailor
@@ -44,6 +46,10 @@ class BatchProcessor:
         tailor:         ResumeTailor backed by ProviderRouter.
         batch_cfg:      dict from config["batch"].
         docx_renderer:  optional DocxRenderer for DOCX output.
+        critic:         optional AtsCritic. When set, every successfully
+                         tailored job also gets a best-effort LLM critique
+                         (never blocks the job on failure). The free
+                         keyword-coverage check always runs regardless.
     """
 
     def __init__(
@@ -52,10 +58,12 @@ class BatchProcessor:
         tailor: ResumeTailor,
         batch_cfg: dict,
         docx_renderer: DocxRenderer | None = None,
+        critic: AtsCritic | None = None,
     ) -> None:
         self._tracker = tracker
         self._tailor = tailor
         self._docx_renderer = docx_renderer
+        self._critic = critic
         self._batch_size: int = int(batch_cfg.get("batch_size", 5))
         self._sla_hours: int = int(batch_cfg.get("target_sla_hours", 24))
         self._max_retries: int = int(batch_cfg.get("max_retries", 3))
@@ -205,6 +213,34 @@ class BatchProcessor:
                     "Job %s tailored OK via %s track=%s cost=$%.4f",
                     job_id, result.provider, track, result.estimated_cost_usd,
                 )
+
+                # --- Keyword coverage check (free, deterministic, always on) ---
+                try:
+                    coverage = check_coverage(raw_desc, result.text)
+                    self._tracker.update(
+                        job_id,
+                        keyword_coverage_score=round(coverage.score * 100, 1),
+                        keyword_coverage_missing=", ".join(coverage.missing),
+                    )
+                except Exception as exc:
+                    logger.warning("Keyword coverage check failed for job %s: %s", job_id, exc)
+
+                # --- ATS critic (LLM, critique-only, best-effort) ---
+                if self._critic is not None:
+                    try:
+                        critique = self._critic.critique(
+                            job_description=raw_desc,
+                            tailored_resume=result.text,
+                            idempotency_key=f"{idem_key}-critique",
+                            job_id=job_id,
+                        )
+                        self._tracker.update(
+                            job_id,
+                            ats_critique=critique.raw_text,
+                            ats_verdict=critique.verdict,
+                        )
+                    except Exception as exc:
+                        logger.warning("ATS critique failed for job %s: %s", job_id, exc)
 
                 # DOCX rendering (idempotent — renderer skips if file is already valid)
                 if self._docx_renderer:

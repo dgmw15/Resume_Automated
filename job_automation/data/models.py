@@ -64,6 +64,11 @@ class JobListing(BaseModel):
     docx_path: Optional[str] = None
     docx_validation_error: Optional[str] = None
     processed_at: Optional[datetime] = None
+    # ATS coverage / critique fields
+    keyword_coverage_score: Optional[float] = None    # 0-100, free deterministic check
+    keyword_coverage_missing: Optional[str] = None     # comma-separated missing skills
+    ats_critique: Optional[str] = None                 # raw LLM critique text
+    ats_verdict: Optional[str] = None                  # "PASS" | "WEAK" | "FAIL" | "UNKNOWN"
     # Salary fields — schema parity with trawl output (data_checker Phase D)
     salary_raw: Optional[str] = None
     salary_min: Optional[float] = None
@@ -84,4 +89,6 @@ class JobListing(BaseModel):
         "employment_filter_status", "employment_filter_reason",
         "salary_raw", "salary_min", "salary_max", "salary_currency",
         "salary_period", "salary_status",
+        "keyword_coverage_score", "keyword_coverage_missing",
+        "ats_critique", "ats_verdict",
     ]

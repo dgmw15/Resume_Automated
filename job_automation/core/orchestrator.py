@@ -80,11 +80,19 @@ class Orchestrator:
         try:
             self.router = ProviderRouter(self.config)
             self.tailor = ResumeTailor(self.router)
+
+            critic = None
+            if self.config.get("resume_tailoring", {}).get("enable_ats_critic", True):
+                from ai.critic import AtsCritic
+                critic = AtsCritic(self.router)
+                logger.info("ATS critic enabled.")
+
             batch_cfg = self.config.get("batch", {})
             if batch_cfg.get("enabled", True):
                 docx_renderer = build_renderer_from_config(self.config)
                 self.batch_processor = BatchProcessor(
-                    self.tracker, self.tailor, batch_cfg, docx_renderer=docx_renderer
+                    self.tracker, self.tailor, batch_cfg,
+                    docx_renderer=docx_renderer, critic=critic,
                 )
                 logger.info("BatchProcessor initialised (interval=%dmin).",
                             batch_cfg.get("interval_minutes", 30))
